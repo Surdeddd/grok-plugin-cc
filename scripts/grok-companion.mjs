@@ -836,6 +836,62 @@ async function cmdReview(argv, {
   });
   const size = estimateReviewSize(git);
 
+  // dry-run always returns JSON (including empty trees) so CI/smoke can parse it
+  if (flags.has("dry-run")) {
+    const prompt = loadPrompt(promptName, {
+      FOCUS: text ? `Extra focus from user:\n${text}` : "",
+      USER_FOCUS: text || "(none)",
+      TARGET_LABEL: git.label,
+      GIT_CONTEXT: git.text,
+      REVIEW_COLLECTION_GUIDANCE:
+        git.scope === "branch"
+          ? "Review the branch range diff vs the base ref. Prefer concrete file:line findings."
+          : "Use git status/diff of the working tree. Prefer concrete file:line findings.",
+    });
+    const job = createJob({
+      kind,
+      prompt,
+      mode: "readonly",
+      model: kv.model,
+      maxTurns: kv.maxTurns || maxTurnsDefault,
+      jsonSchemaPath: REVIEW_SCHEMA_PATH,
+      bestOfN: kv.bestOfN,
+      meta: {
+        scope: git.scope,
+        label: git.label,
+        base: git.base || null,
+        fileCount: git.fileCount,
+        size,
+        bestOfN: Number.isFinite(kv.bestOfN) ? kv.bestOfN : null,
+        empty: git.empty,
+      },
+    });
+    const args = buildGrokArgs(job);
+    const payload = {
+      dryRun: true,
+      jobId: job.id,
+      kind,
+      grokBin: resolveGrokBin(),
+      bestOfN: job.bestOfN,
+      git: {
+        scope: git.scope,
+        label: git.label,
+        base: git.base || null,
+        fileCount: git.fileCount,
+        size,
+        empty: git.empty,
+      },
+      argsPreview: args.map((a, i) => (i > 0 && args[i - 1] === "--json-schema" ? "<schema>" : a)),
+      schema: REVIEW_SCHEMA_PATH,
+    };
+    job.status = "cancelled";
+    job.error = "dry-run";
+    job.finishedAt = nowIso();
+    writeJob(job);
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
   if (git.empty && !text) {
     const msg = `Nothing to review for scope=${git.scope} (${git.label}). Working tree clean / empty branch range.`;
     if (flags.has("json")) {
@@ -874,33 +930,6 @@ async function cmdReview(argv, {
       bestOfN: Number.isFinite(kv.bestOfN) ? kv.bestOfN : null,
     },
   });
-
-  if (flags.has("dry-run")) {
-    const args = buildGrokArgs(job);
-    const payload = {
-      dryRun: true,
-      jobId: job.id,
-      kind,
-      grokBin: resolveGrokBin(),
-      bestOfN: job.bestOfN,
-      git: {
-        scope: git.scope,
-        label: git.label,
-        base: git.base || null,
-        fileCount: git.fileCount,
-        size,
-        empty: git.empty,
-      },
-      argsPreview: args.map((a, i) => (i > 0 && args[i - 1] === "--json-schema" ? "<schema>" : a)),
-      schema: REVIEW_SCHEMA_PATH,
-    };
-    job.status = "cancelled";
-    job.error = "dry-run";
-    job.finishedAt = nowIso();
-    writeJob(job);
-    console.log(JSON.stringify(payload, null, 2));
-    return;
-  }
 
   const done = await runGrokForeground(job);
   emitJobResult(done, flags);

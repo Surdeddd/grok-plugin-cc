@@ -24,12 +24,19 @@ assert.equal(setupJson.pluginVersion, "0.7.0");
 assert.ok("reviewGateEnabled" in setupJson);
 assert.ok(setupJson.checks?.schemaOk);
 
+// CI checkout is often a clean tree — dry-run must still return parseable JSON
 const review = run(["review", "--dry-run", "--scope", "working-tree", "--best-of-n", "2"]);
 assert.equal(review.status, 0, review.stderr + review.stdout);
-const reviewJson = JSON.parse(review.stdout);
+let reviewJson;
+try {
+  reviewJson = JSON.parse(review.stdout);
+} catch (e) {
+  assert.fail(`review --dry-run must emit JSON even on clean tree; got:\n${review.stdout}`);
+}
 assert.equal(reviewJson.dryRun, true);
 assert.equal(reviewJson.kind, "review");
 assert.ok(reviewJson.git);
+assert.equal(typeof reviewJson.git.empty, "boolean");
 assert.equal(reviewJson.bestOfN, 2);
 assert.ok(reviewJson.argsPreview.includes("--best-of-n"));
 assert.ok(reviewJson.argsPreview.includes("--json-schema") || reviewJson.schema);
