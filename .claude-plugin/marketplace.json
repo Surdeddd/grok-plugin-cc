@@ -1,0 +1,16 @@
+{
+  "name": "grok-marketplace",
+  "owner": {
+    "name": "maksimkravcov"
+  },
+  "metadata": {
+    "description": "Claude Code plugin that delegates review, ask, and rescue work to the local Grok Build CLI.",
+    "version": "0.2.0"
+  },
+  "plugins": [
+    {
+      "name": "grok",
+      "source": "./"
+    }
+  ]
+}
