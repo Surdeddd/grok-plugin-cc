@@ -13,6 +13,12 @@ import { randomUUID } from "node:crypto";
 
 import { recordJobInCwdIndex, readCwdIndex } from "./lib/cwd-index.mjs";
 import { collectGitContext, estimateReviewSize } from "./lib/git-context.mjs";
+import {
+  appendProgress,
+  createStreamAggregator,
+  formatProgressHuman,
+  readLastProgress,
+} from "./lib/progress.mjs";
 import { renderReviewMarkdown, tryParseReviewPayload } from "./lib/review-render.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -22,7 +28,7 @@ const JOBS_DIR = path.join(STATE_DIR, "jobs");
 const LATEST_PATH = path.join(STATE_DIR, "latest.json");
 const CONFIG_PATH = path.join(STATE_DIR, "config.json");
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
-const PLUGIN_VERSION = "0.5.0";
+const PLUGIN_VERSION = "0.6.0";
 const TASK_KINDS = new Set(["task", "rescue"]);
 const REVIEW_KINDS = new Set(["review", "adversarial-review"]);
 const CLAUDE_SESSION_ENV = "GROK_PLUGIN_CC_CLAUDE_SESSION_ID";
@@ -34,14 +40,15 @@ const DEFAULT_MAX_TURNS_ADVERSARIAL = 16;
 
 function usage() {
   console.log(`Usage:
-  node scripts/grok-companion.mjs setup [--json] [--enable-review-gate|--disable-review-gate]
-  node scripts/grok-companion.mjs review [--json] [--dry-run] [--scope auto|working-tree|branch] [--base <ref>] [--model <m>] [--max-turns <n>] [focus]
+  node scripts/grok-companion.mjs setup|doctor [--json] [--enable-review-gate|--disable-review-gate]
+  node scripts/grok-companion.mjs review [--json] [--dry-run] [--stream] [--scope auto|working-tree|branch] [--base <ref>] [--model <m>] [--max-turns <n>] [focus]
   node scripts/grok-companion.mjs adversarial-review [...] (same flags as review)
-  node scripts/grok-companion.mjs ask [--json] [--dry-run] [--model <m>] [--max-turns <n>] [question]
-  node scripts/grok-companion.mjs task [--json] [--dry-run] [--background] [--write|--readonly] [--resume-last|--resume|--fresh] [--model <m>] [--max-turns <n>] [prompt]
+  node scripts/grok-companion.mjs ask [--json] [--dry-run] [--stream] [--model <m>] [--max-turns <n>] [question]
+  node scripts/grok-companion.mjs task [--json] [--dry-run] [--stream] [--background] [--write|--readonly] [--resume-last|--resume|--fresh] [--model <m>] [--max-turns <n>] [prompt]
   node scripts/grok-companion.mjs rescue ...   (alias of task --write)
   node scripts/grok-companion.mjs task-resume-candidate [--json]
   node scripts/grok-companion.mjs status [job-id] [--json] [--all] [--cwd]
+  node scripts/grok-companion.mjs wait [job-id] [--json] [--timeout-seconds <n>] [--poll-ms <n>]
   node scripts/grok-companion.mjs result [job-id] [--json]
   node scripts/grok-companion.mjs cancel [job-id|--all] [--json] [--cwd]
   node scripts/grok-companion.mjs prune [--json] [--keep <n>]`);
@@ -178,6 +185,7 @@ function splitArgs(argv) {
     else if (a === "--all") flags.add("all");
     else if (a === "--cwd") flags.add("cwd");
     else if (a === "--dry-run") flags.add("dry-run");
+    else if (a === "--stream") flags.add("stream");
     else if (a === "--enable-review-gate") flags.add("enable-review-gate");
     else if (a === "--disable-review-gate") flags.add("disable-review-gate");
     else if (a === "--write") flags.add("write");
@@ -189,6 +197,8 @@ function splitArgs(argv) {
     else if (a === "--scope") kv.scope = argv[++i];
     else if (a === "--base") kv.base = argv[++i];
     else if (a === "--keep") kv.keep = Number(argv[++i]);
+    else if (a === "--timeout-seconds") kv.timeoutSeconds = Number(argv[++i]);
+    else if (a === "--poll-ms") kv.pollMs = Number(argv[++i]);
     else if (a.startsWith("--")) positionals.push(a);
     else positionals.push(a);
   }
@@ -204,9 +214,13 @@ function createJob({
   resumeSession,
   resumeContinue,
   jsonSchemaPath,
+  stream,
   meta,
 }) {
   const id = randomUUID();
+  // Schema mode requires final JSON object — keep output-format json.
+  // Otherwise default to streaming-json so we can journal progress.
+  const useStream = Boolean(stream) || !jsonSchemaPath;
   const job = {
     id,
     kind,
@@ -218,6 +232,7 @@ function createJob({
     resumeSession: resumeSession || null,
     resumeContinue: Boolean(resumeContinue),
     jsonSchemaPath: jsonSchemaPath || null,
+    stream: useStream && !jsonSchemaPath,
     sessionId: null,
     claudeSessionId: process.env[CLAUDE_SESSION_ENV] || null,
     startedAt: nowIso(),
@@ -228,10 +243,13 @@ function createJob({
     pid: null,
     outputPath: path.join(JOBS_DIR, `${id}.out.json`),
     logPath: path.join(JOBS_DIR, `${id}.log`),
+    progressPath: path.join(JOBS_DIR, `${id}.progress.jsonl`),
+    progress: null,
     text: null,
     structured: null,
     meta: meta || null,
   };
+  appendProgress(job.progressPath, { type: "created", kind: job.kind, stream: job.stream });
   return writeJob(job);
 }
 
@@ -265,16 +283,17 @@ function parseGrokJson(raw) {
 }
 
 function buildGrokArgs(job) {
+  const format = job.stream ? "streaming-json" : "json";
   const args = [
     "-p", job.prompt,
-    "--output-format", "json",
+    "--output-format", format,
     "--cwd", job.cwd || process.cwd(),
   ];
   if (job.maxTurns) args.push("--max-turns", String(job.maxTurns));
   if (job.model) args.push("--model", job.model);
 
   if (job.jsonSchemaPath) {
-    // Path form: grok accepts schema string; pass file contents as JSON string
+    // --json-schema implies json output; do not mix with streaming-json
     const schemaText = fs.readFileSync(job.jsonSchemaPath, "utf8");
     args.push("--json-schema", schemaText);
   }
@@ -295,8 +314,20 @@ function buildGrokArgs(job) {
   return args;
 }
 
-function finalizeJob(job, { exitCode, stdout, stderr, error }) {
-  const parsed = parseGrokJson(stdout || "");
+function finalizeJob(job, { exitCode, stdout, stderr, error, streamFinish }) {
+  let parsed;
+  if (streamFinish) {
+    parsed = {
+      text: streamFinish.text,
+      sessionId: streamFinish.sessionId,
+      usage: streamFinish.usage,
+      raw: streamFinish.raw,
+    };
+    job.progress = streamFinish.progress || job.progress;
+  } else {
+    parsed = parseGrokJson(stdout || "");
+  }
+
   job.exitCode = exitCode;
   job.finishedAt = nowIso();
   job.status = exitCode === 0 ? "completed" : "failed";
@@ -305,7 +336,6 @@ function finalizeJob(job, { exitCode, stdout, stderr, error }) {
   job.error = error || (exitCode === 0 ? null : (stderr || `exit ${exitCode}`).slice(0, 2000));
   job.usage = parsed.usage || null;
 
-  // structured review extraction
   if (REVIEW_KINDS.has(job.kind)) {
     const structured = tryParseReviewPayload(parsed.raw) || tryParseReviewPayload(parsed.text);
     job.structured = structured;
@@ -320,6 +350,12 @@ function finalizeJob(job, { exitCode, stdout, stderr, error }) {
   if (stderr) {
     try { fs.appendFileSync(job.logPath, stderr); } catch { /* ignore */ }
   }
+  appendProgress(job.progressPath, {
+    type: "finished",
+    status: job.status,
+    exitCode,
+    progress: job.progress || null,
+  });
   return writeJob(job);
 }
 
@@ -333,6 +369,7 @@ function formatJobMetaHeader(job) {
   if (job.meta?.label) bits.push(job.meta.label);
   if (job.sessionId) bits.push(`session=${String(job.sessionId).slice(0, 8)}`);
   if (job.usage?.total_tokens) bits.push(`tokens=${job.usage.total_tokens}`);
+  if (job.progress) bits.push(formatProgressHuman(job.progress));
   return `<!-- ${bits.join(" · ")} -->\n`;
 }
 
@@ -366,6 +403,8 @@ function runGrokForeground(job) {
   const args = buildGrokArgs(job);
   const outChunks = [];
   const errChunks = [];
+  const agg = job.stream ? createStreamAggregator() : null;
+  let lineBuf = "";
 
   return new Promise((resolve) => {
     const child = spawn(grok, args, {
@@ -375,29 +414,50 @@ function runGrokForeground(job) {
     });
     job.pid = child.pid;
     writeJob(job);
+    appendProgress(job.progressPath, { type: "spawn", pid: job.pid, stream: Boolean(job.stream) });
 
-    child.stdout.on("data", (d) => outChunks.push(d));
+    const heartbeat = setInterval(() => {
+      const snap = agg ? agg.snapshot() : { heartbeat: true };
+      job.progress = snap;
+      appendProgress(job.progressPath, { type: "heartbeat", progress: snap });
+      try { writeJob(job); } catch { /* ignore */ }
+    }, 2500);
+
+    child.stdout.on("data", (d) => {
+      outChunks.push(d);
+      if (!agg) return;
+      lineBuf += d.toString("utf8");
+      const parts = lineBuf.split("\n");
+      lineBuf = parts.pop() || "";
+      for (const line of parts) {
+        const hit = agg.onLine(line);
+        if (hit) {
+          job.progress = hit.state;
+          appendProgress(job.progressPath, { type: "stream", event: hit.type, progress: hit.state });
+        }
+      }
+    });
     child.stderr.on("data", (d) => {
       errChunks.push(d);
       try { fs.appendFileSync(job.logPath, d); } catch { /* ignore */ }
     });
 
-    child.on("error", (err) => {
-      resolve(finalizeJob(job, {
-        exitCode: 1,
-        stdout: Buffer.concat(outChunks).toString("utf8"),
-        stderr: Buffer.concat(errChunks).toString("utf8"),
-        error: String(err),
-      }));
-    });
-
-    child.on("close", (code) => {
+    const finish = (code, error) => {
+      clearInterval(heartbeat);
+      if (agg && lineBuf.trim()) agg.onLine(lineBuf);
+      const stdout = Buffer.concat(outChunks).toString("utf8");
+      const stderr = Buffer.concat(errChunks).toString("utf8");
       resolve(finalizeJob(job, {
         exitCode: code ?? 1,
-        stdout: Buffer.concat(outChunks).toString("utf8"),
-        stderr: Buffer.concat(errChunks).toString("utf8"),
+        stdout,
+        stderr,
+        error,
+        streamFinish: agg ? agg.finish(stdout) : null,
       }));
-    });
+    };
+
+    child.on("error", (err) => finish(1, String(err)));
+    child.on("close", (code) => finish(code ?? 1));
   });
 }
 
@@ -412,14 +472,55 @@ function runGrokBackground(job) {
   }
 
   const args = buildGrokArgs(job);
+  // Detached worker with progress journal + optional streaming-json aggregation
   const runner = `
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+
 const jobPath = ${JSON.stringify(jobPath(job.id))};
 const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
 const args = ${JSON.stringify(args)};
+const progressPath = job.progressPath;
+const stream = ${JSON.stringify(Boolean(job.stream))};
+
+function appendProgress(event) {
+  try {
+    fs.appendFileSync(progressPath, JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\\n");
+  } catch {}
+}
+
+const counts = Object.create(null);
+let text = "";
+let thoughtChars = 0;
+let textChars = 0;
+let toolCalls = 0;
+let lastType = null;
+let sessionId = null;
+let usage = null;
+let lineBuf = "";
+
+function onLine(line) {
+  const t = String(line || "").trim();
+  if (!t) return;
+  try {
+    const ev = JSON.parse(t);
+    const type = ev.type || "unknown";
+    counts[type] = (counts[type] || 0) + 1;
+    lastType = type;
+    if (type === "text" && typeof ev.data === "string") { text += ev.data; textChars += ev.data.length; }
+    if (type === "thought" && typeof ev.data === "string") thoughtChars += ev.data.length;
+    if (type === "tool_call" || type === "tool" || type === "tool_use") toolCalls += 1;
+    if (type === "end") { sessionId = ev.sessionId || sessionId; usage = ev.usage || usage; }
+    if (ev.sessionId) sessionId = ev.sessionId;
+  } catch {}
+}
+
+function snap() {
+  return { textChars, thoughtChars, toolCalls, lastType, eventCounts: { ...counts }, sessionId };
+}
+
 const child = spawn(${JSON.stringify(grok)}, args, {
   cwd: job.cwd,
   env: process.env,
@@ -428,35 +529,69 @@ const child = spawn(${JSON.stringify(grok)}, args, {
 });
 job.pid = child.pid;
 fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
+appendProgress({ type: "spawn", pid: job.pid, stream });
+
 const out = [];
 const err = [];
-child.stdout.on("data", (d) => out.push(d));
+const hb = setInterval(() => {
+  job.progress = snap();
+  appendProgress({ type: "heartbeat", progress: job.progress });
+  try { fs.writeFileSync(jobPath, JSON.stringify(job, null, 2)); } catch {}
+}, 2500);
+
+child.stdout.on("data", (d) => {
+  out.push(d);
+  if (!stream) return;
+  lineBuf += d.toString("utf8");
+  const parts = lineBuf.split("\\n");
+  lineBuf = parts.pop() || "";
+  for (const line of parts) {
+    onLine(line);
+    job.progress = snap();
+    appendProgress({ type: "stream", event: lastType, progress: job.progress });
+  }
+});
 child.stderr.on("data", (d) => {
   err.push(d);
   try { fs.appendFileSync(job.logPath, d); } catch {}
 });
 child.on("close", (code) => {
+  clearInterval(hb);
+  if (stream && lineBuf.trim()) onLine(lineBuf);
   const stdout = Buffer.concat(out).toString("utf8");
-  let text = stdout;
-  let sessionId = null;
-  let usage = null;
   let raw = stdout;
-  try {
-    const obj = JSON.parse(stdout.trim());
-    text = obj.text ?? stdout;
-    sessionId = obj.sessionId ?? null;
-    usage = obj.usage ?? null;
-    raw = obj;
-  } catch {}
+  if (stream) {
+    if (!text) {
+      try {
+        const obj = JSON.parse(stdout.trim());
+        text = obj.text ?? stdout;
+        sessionId = obj.sessionId ?? sessionId;
+        usage = obj.usage ?? usage;
+        raw = obj;
+      } catch { text = stdout; }
+    } else {
+      raw = { text, sessionId, usage, stopReason: "EndTurn", stream: true };
+    }
+  } else {
+    try {
+      const obj = JSON.parse(stdout.trim());
+      text = obj.text ?? stdout;
+      sessionId = obj.sessionId ?? null;
+      usage = obj.usage ?? null;
+      raw = obj;
+    } catch { text = stdout; }
+  }
   job.exitCode = code ?? 1;
   job.status = code === 0 ? "completed" : "failed";
   job.finishedAt = new Date().toISOString();
   job.sessionId = sessionId;
   job.text = text;
   job.usage = usage;
+  job.progress = snap();
   job.error = code === 0 ? null : Buffer.concat(err).toString("utf8").slice(0, 2000);
   try { fs.writeFileSync(job.outputPath, JSON.stringify(raw, null, 2)); } catch {}
   fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
+  appendProgress({ type: "finished", status: job.status, exitCode: job.exitCode, progress: job.progress });
   try {
     const stateDir = ${JSON.stringify(STATE_DIR)};
     const key = crypto.createHash("sha256").update(path.resolve(job.cwd || process.cwd())).digest("hex").slice(0, 24);
@@ -518,8 +653,24 @@ function renderSetup(argv) {
   }
   const cwdIndex = readCwdIndex(STATE_DIR, process.cwd());
   const running = jobsForCwd().filter((j) => j.status === "running");
+  const checks = {
+    nodeOk: Number(process.versions.node.split(".")[0]) >= 18,
+    schemaOk: fs.existsSync(REVIEW_SCHEMA_PATH),
+    stateWritable: (() => {
+      try {
+        ensureDirs();
+        const probe = path.join(STATE_DIR, ".write-probe");
+        fs.writeFileSync(probe, "ok");
+        fs.unlinkSync(probe);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+    hooksJsonOk: fs.existsSync(path.join(ROOT_DIR, "hooks", "hooks.json")),
+  };
   const payload = {
-    ok: Boolean(grok && authPresent()),
+    ok: Boolean(grok && authPresent() && checks.nodeOk && checks.schemaOk && checks.stateWritable),
     grokBin: grok,
     version,
     authenticated: authPresent(),
@@ -527,6 +678,7 @@ function renderSetup(argv) {
     pluginRoot: ROOT_DIR,
     pluginVersion: PLUGIN_VERSION,
     reviewGateEnabled: Boolean(config.stopReviewGate),
+    checks,
     cwd: process.cwd(),
     cwdResume: cwdIndex
       ? {
@@ -535,35 +687,48 @@ function renderSetup(argv) {
           lastJobId: cwdIndex.lastJobId || null,
         }
       : null,
-    runningJobs: running.map((j) => j.id),
+    runningJobs: running.map((j) => ({
+      id: j.id,
+      kind: j.kind,
+      progress: j.progress || null,
+    })),
   };
   if (flags.has("json")) {
     console.log(JSON.stringify(payload, null, 2));
     return;
   }
   const lines = [
-    "grok-plugin-cc setup",
+    "grok-plugin-cc setup / doctor",
     "",
     `Status:          ${payload.ok ? "ready" : "not ready"}`,
     `Grok binary:     ${payload.grokBin || "(missing)"}`,
     `Version:         ${payload.version || "(unknown)"}`,
     `Authenticated:   ${payload.authenticated ? "yes" : "no — run: grok  (or complete OAuth)"}`,
     `Review gate:     ${payload.reviewGateEnabled ? "enabled" : "disabled"}`,
+    `Node >=18:       ${checks.nodeOk ? "yes" : "no"} (${process.versions.node})`,
+    `Schema file:     ${checks.schemaOk ? "yes" : "missing"}`,
+    `State writable:  ${checks.stateWritable ? "yes" : "no"}`,
+    `Hooks present:   ${checks.hooksJsonOk ? "yes" : "no"}`,
     `State dir:       ${payload.stateDir}`,
     `Plugin version:  ${payload.pluginVersion}`,
     `Cwd resume:      ${payload.cwdResume?.lastTaskSessionId || "(none yet)"}`,
-    `Running jobs:    ${payload.runningJobs.length ? payload.runningJobs.join(", ") : "none"}`,
+    `Running jobs:    ${payload.runningJobs.length
+      ? payload.runningJobs.map((j) => `${j.id.slice(0, 8)}(${j.kind}${j.progress ? " " + formatProgressHuman(j.progress) : ""})`).join(", ")
+      : "none"}`,
     "",
   ];
   if (payload.ok) {
     lines.push("Next: /grok:review, /grok:adversarial-review, /grok:ask, /grok:rescue");
+    lines.push("Wait on background: node scripts/grok-companion.mjs wait <job-id>");
     if (!payload.reviewGateEnabled) {
       lines.push("Optional: /grok:setup --enable-review-gate  (Stop hook blocks on BLOCK: findings)");
     }
   } else if (!grok) {
     lines.push("Install Grok Build CLI, or set GROK_PLUGIN_CC_GROK_BIN.");
-  } else {
+  } else if (!authPresent()) {
     lines.push("Authenticate Grok Build, then re-run /grok:setup.");
+  } else {
+    lines.push("Doctor checks failed — see Node/schema/state rows above.");
   }
   console.log(lines.join("\n"));
 }
@@ -709,6 +874,7 @@ async function cmdAsk(argv) {
     mode: "readonly",
     model: kv.model,
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_ASK,
+    stream: flags.has("stream") || true,
   });
 
   if (flags.has("dry-run")) {
@@ -765,6 +931,7 @@ async function cmdTask(argv, { forceWrite = false, kind = "task" } = {}) {
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_RESCUE,
     resumeSession,
     resumeContinue,
+    stream: flags.has("stream") || true,
   });
 
   if (flags.has("dry-run")) {
@@ -846,7 +1013,49 @@ function printJobTable(jobs) {
     const status = String(j.status || "?").padEnd(10);
     const kind = String(j.kind || "?").padEnd(18);
     const scope = j.meta?.scope ? String(j.meta.scope).padEnd(12) : "".padEnd(12);
-    console.log(`${id}  ${status}  ${kind}  ${scope}  ${j.startedAt || "-"}`);
+    const prog = j.status === "running" ? formatProgressHuman(j.progress) : "";
+    console.log(`${id}  ${status}  ${kind}  ${scope}  ${j.startedAt || "-"}${prog ? "  " + prog : ""}`);
+  }
+}
+
+async function cmdWait(argv) {
+  const { flags, kv } = splitArgs(argv);
+  const idArg = argv.find((a) => !a.startsWith("--"));
+  const id = resolveJobId(idArg);
+  if (!id) {
+    console.error("No job to wait on.");
+    process.exit(1);
+  }
+  const timeoutMs = (Number.isFinite(kv.timeoutSeconds) ? kv.timeoutSeconds : 900) * 1000;
+  const pollMs = Number.isFinite(kv.pollMs) ? kv.pollMs : 1500;
+  const started = Date.now();
+
+  while (true) {
+    let job = readJob(id);
+    if (!job) {
+      console.error(`Job not found: ${id}`);
+      process.exit(1);
+    }
+    job = refreshRunningJob(job);
+    if (job.status !== "running") {
+      // print result
+      console.log(formatJobOutput(job, flags));
+      process.exit(job.status === "completed" ? 0 : 1);
+    }
+    if (!flags.has("json")) {
+      const last = readLastProgress(job.progressPath, 1)[0];
+      const prog = formatProgressHuman(job.progress || last?.progress);
+      process.stderr.write(`waiting ${id.slice(0, 8)} … ${prog}\n`);
+    }
+    if (Date.now() - started > timeoutMs) {
+      if (flags.has("json")) {
+        console.log(JSON.stringify({ ok: false, timedOut: true, job }, null, 2));
+      } else {
+        console.error(`Timed out after ${timeoutMs / 1000}s waiting for ${id}`);
+      }
+      process.exit(2);
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
   }
 }
 
@@ -976,6 +1185,7 @@ async function main() {
 
   switch (cmd) {
     case "setup":
+    case "doctor":
       renderSetup(rest);
       break;
     case "review":
@@ -1002,6 +1212,9 @@ async function main() {
       break;
     case "status":
       cmdStatus(rest);
+      break;
+    case "wait":
+      await cmdWait(rest);
       break;
     case "result":
       cmdResult(rest);

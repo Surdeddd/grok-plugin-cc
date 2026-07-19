@@ -1,17 +1,18 @@
 # Changelog
 
+## 0.6.0
+
+Live ops + demo:
+
+- **Streaming progress** — task/ask default to `streaming-json`; journal `*.progress.jsonl` with heartbeats
+- **`wait`** — poll background job until done, print result (`--timeout-seconds`, `--poll-ms`)
+- **Doctor** — `setup`/`doctor` checks node, schema, state writable, hooks; shows running job progress
+- **Status** — shows live progress summary for running jobs
+- **DEMO.md** + `npm run demo` (token-free dry-run walkthrough)
+
 ## 0.5.0
 
-Next polish layer:
-
-- **Review scopes** — `--scope auto|working-tree|branch` and `--base <ref>` with richer git context
-- **Empty-scope short-circuit** — no token burn when nothing to review
-- **Session lifecycle hooks** — SessionStart exports Claude session id; SessionEnd cancels jobs tagged with that session
-- **Status UX** — default list is current cwd; `--all` for global; shows scope column
-- **Cancel** — `cancel --all` for bulk stop; jobs tagged with `claudeSessionId`
-- **Prune** — `prune [--keep N]` drops old finished job records (default keep 50)
-- **Result meta header** — job id / scope / tokens line above markdown
-- **GitHub Actions** — `npm run check` on push/PR
+Review scopes, session lifecycle, status/cancel UX, prune, GitHub Actions CI.
 
 ## 0.4.0
 
@@ -19,7 +20,7 @@ Structured reviews, per-cwd resume, dry-run tests, stop-gate polish.
 
 ## 0.3.0
 
-Codex-parity surface: `task`, `task-resume-candidate`, adversarial-review, skills, NL spawn.
+Codex-parity surface: task, resume-candidate, adversarial-review, skills, NL spawn.
 
 ## 0.2.0
 

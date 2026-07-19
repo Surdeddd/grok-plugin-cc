@@ -20,8 +20,9 @@ function run(args) {
 const setup = run(["setup", "--json"]);
 assert.equal(setup.status, 0, setup.stderr);
 const setupJson = JSON.parse(setup.stdout);
-assert.equal(setupJson.pluginVersion, "0.5.0");
+assert.equal(setupJson.pluginVersion, "0.6.0");
 assert.ok("reviewGateEnabled" in setupJson);
+assert.ok(setupJson.checks?.schemaOk);
 
 const review = run(["review", "--dry-run", "--scope", "working-tree"]);
 assert.equal(review.status, 0, review.stderr + review.stdout);

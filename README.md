@@ -49,8 +49,9 @@ Slash: `/grok:rescue <task>`.
 | `/grok:ask` | plan | Free-form Q&A |
 | `/grok:rescue` | write (`task`) | Delegate work via subagent |
 | `/grok:status` / `result` / `cancel` | — | Job control (status default = cwd) |
+| `/grok:wait` | — | Block until background job finishes |
 
-Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--scope`, `--base`, `--model`, `--max-turns`, `--dry-run` (companion).
+Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--scope`, `--base`, `--model`, `--max-turns`, `--dry-run`, `--stream` (companion).
 
 ### Structured review
 
@@ -95,16 +96,27 @@ node scripts/grok-companion.mjs task-resume-candidate
 node scripts/grok-companion.mjs status
 node scripts/grok-companion.mjs cancel --all
 node scripts/grok-companion.mjs prune --keep 50
+node scripts/grok-companion.mjs wait <job-id>
+node scripts/grok-companion.mjs doctor
 ```
 
-## Tests
+### Progress
+
+Background/foreground task & ask jobs write:
+
+`~/.grok-plugin-cc/jobs/<id>.progress.jsonl`
+
+`status` shows a short progress summary; `wait` polls until done.
+
+## Tests & demo
 
 ```bash
 npm test          # unit + dry-run smoke (no Grok tokens)
 npm run check     # syntax + tests
+npm run demo      # printable dry-run walkthrough
 ```
 
-CI: GitHub Actions runs `npm run check` on `main` and PRs.
+See [DEMO.md](./DEMO.md). CI: GitHub Actions on `main` / PRs.
 
 ## Env
 

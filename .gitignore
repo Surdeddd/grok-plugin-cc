@@ -3,3 +3,4 @@ node_modules/
 *.log
 .grok-plugin-cc/
 .tmp-test-state/
+*.progress.jsonl
