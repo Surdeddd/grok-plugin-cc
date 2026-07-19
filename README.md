@@ -1,8 +1,8 @@
 # grok-plugin-cc
 
-Use [Grok Build CLI](https://x.ai) from [Claude Code](https://claude.ai/code) as a second agent — review, ask, rescue, optional stop-time gate.
+Use [Grok Build CLI](https://x.ai) from [Claude Code](https://claude.ai/code) as a second agent — Codex-shaped companion for review, adversarial review, ask, rescue/task, and optional stop-time gate.
 
-Pattern mirrors OpenAI's `codex-plugin-cc` and community `kimi-plugin-cc`: thin slash-command shell + local companion that spawns headless `grok -p`.
+Architecture mirrors OpenAI's [`codex-plugin-cc`](https://github.com/openai/codex-plugin-cc): thin slash-command shell + skills + `grok:grok-rescue` subagent + local companion that spawns headless `grok -p`.
 
 ## Requirements
 
@@ -12,8 +12,6 @@ Pattern mirrors OpenAI's `codex-plugin-cc` and community `kimi-plugin-cc`: thin 
 
 ## Install
 
-### From GitHub
-
 ```bash
 /plugin marketplace add Surdeddd/grok-plugin-cc
 /plugin install grok@grok-marketplace
@@ -21,72 +19,75 @@ Pattern mirrors OpenAI's `codex-plugin-cc` and community `kimi-plugin-cc`: thin 
 /grok:setup
 ```
 
-### From local clone
+Local:
 
 ```bash
 claude plugin marketplace add ~/Projects/Personal/grok-plugin-cc
 claude plugin install grok@grok-marketplace
 ```
 
-Or one-shot for a session:
+## Natural-language spawn (from Claude context)
 
-```bash
-claude --plugin-dir ~/Projects/Personal/grok-plugin-cc
-```
+Claude can spawn the agent without a slash command when you say things like:
+
+- «вызови grok» / «вызови грок» / «grok-агент» / «подними grok»
+- "call grok" / "spawn grok agent" / "use grok" / "ask grok to …"
+
+That routes to subagent **`grok:grok-rescue`** → companion `task` → headless `grok -p`.
+
+Slash form still works: `/grok:rescue <task>`.
 
 ## Commands
 
-| Command | Mode | What it does |
+| Command | Mode | What |
 |---|---|---|
 | `/grok:setup` | — | Probe binary + auth; toggle review gate |
-| `/grok:review [focus]` | plan (read-only) | Review working tree |
-| `/grok:ask <q>` | plan (read-only) | Free-form Q&A |
-| `/grok:rescue [task]` | write | Delegate real work |
+| `/grok:review` | plan | Working-tree review |
+| `/grok:adversarial-review` | plan | Challenge design/approach |
+| `/grok:ask` | plan | Free-form Q&A |
+| `/grok:rescue` | write (`task`) | Delegate real work via subagent |
 | `/grok:status` / `result` / `cancel` | — | Job control |
 
-Rescue flags: `--background`, `--resume`, `--fresh`, `--model`, `--max-turns`.
+Rescue flags: `--background`, `--wait`, `--resume`, `--fresh`, `--model`, `--max-turns`.
+
+Companion primary entry is **`task`** (Codex parity). `rescue` is a write-forced alias.
 
 ### Optional stop-time review gate
 
 ```bash
 /grok:setup --enable-review-gate
-/grok:setup --disable-review-gate
 ```
-
-When enabled, a Claude Code `Stop` hook runs Grok in plan mode. Grok must answer with:
-
-```
-ALLOW: <reason>
-# or
-BLOCK: <reason>
-```
-
-`BLOCK` keeps Claude from ending the turn until issues are fixed (or the gate is disabled).
 
 ## How it works
 
 ```
-/grok:rescue "fix the flaky test"
-    └─ node scripts/grok-companion.mjs rescue ...
-         └─ grok -p "<prompt>" --output-format json \
-                --permission-mode bypassPermissions --always-approve
+User: "вызови grok, почини flaky test"
+  └─ Claude spawns grok:grok-rescue
+       └─ node scripts/grok-companion.mjs task "…"
+            └─ grok -p … --output-format json \
+                   --permission-mode bypassPermissions --always-approve
 ```
 
-Review/ask/stop-gate use `--permission-mode plan` so Grok cannot mutate the tree.
+Review / ask / stop-gate use `--permission-mode plan`.
 
-Job state: `~/.grok-plugin-cc/jobs/`  
-Config: `~/.grok-plugin-cc/config.json`
+State: `~/.grok-plugin-cc/`
 
-## Env overrides
+## Env
 
 | Var | Purpose |
 |---|---|
 | `GROK_PLUGIN_CC_GROK_BIN` | Absolute path to `grok` |
 | `GROK_PLUGIN_CC_STATE_DIR` | Override state directory |
 
-## Status
+## Gap vs Codex (honest)
 
-v0.2.0 — setup/review/ask/rescue + job tracking + optional stop-time review gate.
+Still lighter than `codex-plugin-cc`:
+
+- no app-server broker / native structured review schema enforcement
+- no session lifecycle SessionStart/End hooks
+- stop-gate is opt-in and uses plan-mode Grok (not a separate native reviewer)
+
+Close enough for daily multi-model rescue + natural-language spawn.
 
 ## License
 

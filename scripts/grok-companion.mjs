@@ -17,18 +17,23 @@ const STATE_DIR = process.env.GROK_PLUGIN_CC_STATE_DIR
 const JOBS_DIR = path.join(STATE_DIR, "jobs");
 const LATEST_PATH = path.join(STATE_DIR, "latest.json");
 const CONFIG_PATH = path.join(STATE_DIR, "config.json");
-const PLUGIN_VERSION = "0.2.0";
+const PLUGIN_VERSION = "0.3.0";
+const TASK_KINDS = new Set(["task", "rescue"]);
 
 const DEFAULT_MAX_TURNS_REVIEW = 12;
 const DEFAULT_MAX_TURNS_ASK = 16;
 const DEFAULT_MAX_TURNS_RESCUE = 40;
+const DEFAULT_MAX_TURNS_ADVERSARIAL = 16;
 
 function usage() {
   console.log(`Usage:
   node scripts/grok-companion.mjs setup [--json] [--enable-review-gate|--disable-review-gate]
   node scripts/grok-companion.mjs review [--json] [--model <m>] [--max-turns <n>] [focus]
+  node scripts/grok-companion.mjs adversarial-review [--json] [--model <m>] [--max-turns <n>] [focus]
   node scripts/grok-companion.mjs ask [--json] [--model <m>] [--max-turns <n>] [question]
-  node scripts/grok-companion.mjs rescue [--json] [--background] [--resume|--fresh] [--model <m>] [--max-turns <n>] [task]
+  node scripts/grok-companion.mjs task [--json] [--background] [--write|--readonly] [--resume-last|--resume|--fresh] [--model <m>] [--max-turns <n>] [prompt]
+  node scripts/grok-companion.mjs rescue ...   (alias of task --write)
+  node scripts/grok-companion.mjs task-resume-candidate [--json]
   node scripts/grok-companion.mjs status [job-id] [--json] [--all]
   node scripts/grok-companion.mjs result [job-id] [--json]
   node scripts/grok-companion.mjs cancel [job-id] [--json]`);
@@ -170,9 +175,13 @@ function splitArgs(argv) {
     else if (a === "--all") flags.add("all");
     else if (a === "--enable-review-gate") flags.add("enable-review-gate");
     else if (a === "--disable-review-gate") flags.add("disable-review-gate");
+    else if (a === "--write") flags.add("write");
+    else if (a === "--readonly" || a === "--read-only") flags.add("readonly");
+    else if (a === "--resume-last") flags.add("resume-last");
     else if (a === "--model" || a === "-m") kv.model = argv[++i];
     else if (a === "--max-turns") kv.maxTurns = Number(argv[++i]);
     else if (a === "--session") kv.session = argv[++i];
+    else if (a === "--effort") kv.effort = argv[++i]; // accepted, currently unused by grok CLI
     else if (a.startsWith("--")) {
       // unknown flag: keep as positional text so user intent survives
       positionals.push(a);
@@ -472,27 +481,45 @@ function renderJobHuman(job) {
   return lines.join("\n");
 }
 
-function lastResumableSession(kind) {
-  const jobs = listJobs().filter((j) => j.kind === kind && j.sessionId && j.status === "completed");
-  return jobs[0]?.sessionId || null;
+function lastResumableTaskJob() {
+  return listJobs().find((j) => TASK_KINDS.has(j.kind) && j.sessionId && j.status === "completed") || null;
 }
 
-async function cmdReview(argv) {
+function lastResumableSession() {
+  return lastResumableTaskJob()?.sessionId || null;
+}
+
+function emitJobResult(job, flags, { backgroundNote } = {}) {
+  if (flags.has("json")) {
+    console.log(JSON.stringify(job, null, 2));
+    return;
+  }
+  if (backgroundNote) {
+    console.log(backgroundNote);
+    return;
+  }
+  console.log(job.text || job.error || renderJobHuman(job));
+}
+
+async function cmdReview(argv, { kind = "review", promptName = "review", maxTurnsDefault = DEFAULT_MAX_TURNS_REVIEW } = {}) {
   const { flags, kv, text } = splitArgs(argv);
-  const prompt = loadPrompt("review", {
+  const prompt = loadPrompt(promptName, {
     FOCUS: text ? `Extra focus from user:\n${text}` : "",
+    USER_FOCUS: text || "(none)",
+    TARGET_LABEL: "working-tree / recent git state",
     GIT_CONTEXT: gitContext(),
+    REVIEW_COLLECTION_GUIDANCE:
+      "Use git status/diff of the working tree. Prefer concrete file:line findings.",
   });
   const job = createJob({
-    kind: "review",
+    kind,
     prompt,
     mode: "readonly",
     model: kv.model,
-    maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_REVIEW,
+    maxTurns: kv.maxTurns || maxTurnsDefault,
   });
   const done = await runGrokForeground(job);
-  if (flags.has("json")) console.log(JSON.stringify(done, null, 2));
-  else console.log(done.text || done.error || renderJobHuman(done));
+  emitJobResult(done, flags);
   process.exit(done.status === "completed" ? 0 : 1);
 }
 
@@ -511,29 +538,46 @@ async function cmdAsk(argv) {
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_ASK,
   });
   const done = await runGrokForeground(job);
-  if (flags.has("json")) console.log(JSON.stringify(done, null, 2));
-  else console.log(done.text || done.error || renderJobHuman(done));
+  emitJobResult(done, flags);
   process.exit(done.status === "completed" ? 0 : 1);
 }
 
-async function cmdRescue(argv) {
+/**
+ * Primary Codex-shaped entry: task.
+ * Default write-capable (like codex:rescue). Use --readonly for diagnosis-only.
+ */
+async function cmdTask(argv, { forceWrite = false, kind = "task" } = {}) {
   const { flags, kv, text } = splitArgs(argv);
-  if (!text && !flags.has("resume")) {
-    console.error("Usage: rescue [--background] [--resume|--fresh] [task]");
+  const wantsResume = flags.has("resume") || flags.has("resume-last");
+  const wantsFresh = flags.has("fresh");
+  if (wantsResume && wantsFresh) {
+    console.error("Choose either --resume/--resume-last or --fresh.");
+    process.exit(2);
+  }
+  if (!text && !wantsResume) {
+    console.error("Usage: task [--background] [--write|--readonly] [--resume-last|--fresh] [prompt]");
     process.exit(2);
   }
 
   let resumeSession = null;
-  if (flags.has("resume") || (!flags.has("fresh") && kv.session)) {
-    resumeSession = kv.session || lastResumableSession("rescue");
+  if (wantsResume || kv.session) {
+    resumeSession = kv.session || lastResumableSession();
+    if (!resumeSession) {
+      console.error("No resumable Grok task session found. Start a fresh task.");
+      process.exit(1);
+    }
   }
 
-  const taskText = text || "Continue the previous rescue task.";
-  const prompt = loadPrompt("rescue", { TASK: taskText });
+  const write = forceWrite || flags.has("write") || !flags.has("readonly");
+  const taskText = text || "Continue the previous Grok task. Apply the next concrete step.";
+  const prompt = loadPrompt(write ? "rescue" : "ask", {
+    TASK: taskText,
+  });
+
   const job = createJob({
-    kind: "rescue",
+    kind,
     prompt,
-    mode: "write",
+    mode: write ? "write" : "readonly",
     model: kv.model,
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_RESCUE,
     resumeSession,
@@ -541,17 +585,32 @@ async function cmdRescue(argv) {
 
   if (flags.has("background")) {
     runGrokBackground(job);
-    if (flags.has("json")) console.log(JSON.stringify(job, null, 2));
-    else {
-      console.log(`Grok rescue started in background.\njob: ${job.id}\nCheck /grok:status or /grok:result ${job.id}`);
-    }
+    emitJobResult(job, flags, {
+      backgroundNote:
+        `Grok task started in background.\njob: ${job.id}\nCheck /grok:status or /grok:result ${job.id}`,
+    });
     return;
   }
 
   const done = await runGrokForeground(job);
-  if (flags.has("json")) console.log(JSON.stringify(done, null, 2));
-  else console.log(done.text || done.error || renderJobHuman(done));
+  emitJobResult(done, flags);
   process.exit(done.status === "completed" ? 0 : 1);
+}
+
+function cmdTaskResumeCandidate(_argv) {
+  const job = lastResumableTaskJob();
+  const payload = job
+    ? {
+        available: true,
+        jobId: job.id,
+        sessionId: job.sessionId,
+        kind: job.kind,
+        finishedAt: job.finishedAt,
+        cwd: job.cwd,
+      }
+    : { available: false };
+  // Always JSON — consumed by /grok:rescue routing and agent checks.
+  console.log(JSON.stringify(payload, null, 2));
 }
 
 function cmdStatus(argv) {
@@ -663,13 +722,27 @@ async function main() {
       renderSetup(rest);
       break;
     case "review":
-      await cmdReview(rest);
+      await cmdReview(rest, { kind: "review", promptName: "review" });
+      break;
+    case "adversarial-review":
+      await cmdReview(rest, {
+        kind: "adversarial-review",
+        promptName: "adversarial-review",
+        maxTurnsDefault: DEFAULT_MAX_TURNS_ADVERSARIAL,
+      });
       break;
     case "ask":
       await cmdAsk(rest);
       break;
+    case "task":
+      await cmdTask(rest, { kind: "task" });
+      break;
     case "rescue":
-      await cmdRescue(rest);
+      // Codex-shaped alias: always write-capable task
+      await cmdTask(rest, { forceWrite: true, kind: "rescue" });
+      break;
+    case "task-resume-candidate":
+      cmdTaskResumeCandidate(rest);
       break;
     case "status":
       cmdStatus(rest);
