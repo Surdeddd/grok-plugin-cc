@@ -1,6 +1,6 @@
 ---
 description: Delegate investigation or fix work to the Grok rescue subagent (write-capable task runtime)
-argument-hint: "[--background|--wait] [--resume|--fresh] [--model <model>] [--max-turns <n>] [what Grok should investigate, solve, or continue]"
+argument-hint: "[--background|--wait] [--resume|--fresh] [--check] [--best-of-n <n>] [--model <model>] [--max-turns <n>] [what Grok should investigate, solve, or continue]"
 context: fork
 allowed-tools: Bash(node:*), AskUserQuestion
 ---

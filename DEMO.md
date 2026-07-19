@@ -50,16 +50,26 @@ Output shape:
 ...
 ```
 
-## Background + wait
+## Background + wait + live logs
 
 ```bash
 node scripts/grok-companion.mjs task --background "list top 3 TODOs in the repo"
 # → job: <uuid>
 node scripts/grok-companion.mjs status
-node scripts/grok-companion.mjs wait <uuid>
+node scripts/grok-companion.mjs logs <uuid> --follow
+# or
+node scripts/grok-companion.mjs wait <uuid> --follow
 ```
 
 Progress journal: `~/.grok-plugin-cc/jobs/<id>.progress.jsonl`
+
+## Best-of-N review
+
+```bash
+node scripts/grok-companion.mjs review --dry-run --best-of-n 3 --scope working-tree
+# live (uses tokens):
+# /grok:review --best-of-n 3
+```
 
 ## Dry-run (no tokens)
 

@@ -1,6 +1,6 @@
 ---
 description: Run a Grok code review against local git state (read-only / plan mode, structured schema)
-argument-hint: '[--wait|--background] [--scope auto|working-tree|branch] [--base <ref>] [--json] [--model <model>] [--max-turns <n>] [focus text]'
+argument-hint: '[--wait|--background] [--scope auto|working-tree|branch] [--base <ref>] [--best-of-n <n>] [--json] [--model <model>] [--max-turns <n>] [focus text]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -20,6 +20,7 @@ Scope flags (passed through to companion):
 - `--scope working-tree`: status + staged + unstaged
 - `--scope branch`: diff vs `--base` (default main/master/upstream)
 - `--base <ref>`: base ref for branch scope
+- `--best-of-n <n>`: run N parallel Grok reviews and pick the best (headless; more tokens)
 
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run the review in the foreground.

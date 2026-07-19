@@ -27,8 +27,9 @@ function run(label, args) {
 
 console.log("grok-plugin-cc demo (no Grok tokens; dry-run + setup)");
 run("setup", ["setup"]);
-run("review dry-run", ["review", "--dry-run", "--scope", "working-tree"]);
-run("task dry-run", ["task", "--dry-run", "--readonly", "demo ping"]);
+run("review dry-run + best-of-n", ["review", "--dry-run", "--scope", "working-tree", "--best-of-n", "2"]);
+run("task dry-run + check", ["task", "--dry-run", "--readonly", "--check", "demo ping"]);
 run("resume candidate", ["task-resume-candidate"]);
 run("status", ["status"]);
+run("logs (latest)", ["logs", "--tail", "5"]);
 console.log("\n✓ demo complete — install plugin and try /grok:rescue for a live run");

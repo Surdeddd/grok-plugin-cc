@@ -28,7 +28,7 @@ const JOBS_DIR = path.join(STATE_DIR, "jobs");
 const LATEST_PATH = path.join(STATE_DIR, "latest.json");
 const CONFIG_PATH = path.join(STATE_DIR, "config.json");
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
-const PLUGIN_VERSION = "0.6.0";
+const PLUGIN_VERSION = "0.7.0";
 const TASK_KINDS = new Set(["task", "rescue"]);
 const REVIEW_KINDS = new Set(["review", "adversarial-review"]);
 const CLAUDE_SESSION_ENV = "GROK_PLUGIN_CC_CLAUDE_SESSION_ID";
@@ -41,14 +41,15 @@ const DEFAULT_MAX_TURNS_ADVERSARIAL = 16;
 function usage() {
   console.log(`Usage:
   node scripts/grok-companion.mjs setup|doctor [--json] [--enable-review-gate|--disable-review-gate]
-  node scripts/grok-companion.mjs review [--json] [--dry-run] [--stream] [--scope auto|working-tree|branch] [--base <ref>] [--model <m>] [--max-turns <n>] [focus]
+  node scripts/grok-companion.mjs review [--json] [--dry-run] [--stream] [--best-of-n <n>] [--scope auto|working-tree|branch] [--base <ref>] [--model <m>] [--max-turns <n>] [focus]
   node scripts/grok-companion.mjs adversarial-review [...] (same flags as review)
   node scripts/grok-companion.mjs ask [--json] [--dry-run] [--stream] [--model <m>] [--max-turns <n>] [question]
-  node scripts/grok-companion.mjs task [--json] [--dry-run] [--stream] [--background] [--write|--readonly] [--resume-last|--resume|--fresh] [--model <m>] [--max-turns <n>] [prompt]
+  node scripts/grok-companion.mjs task [--json] [--dry-run] [--stream] [--check] [--best-of-n <n>] [--background] [--write|--readonly] [--resume-last|--resume|--fresh] [--model <m>] [--max-turns <n>] [prompt]
   node scripts/grok-companion.mjs rescue ...   (alias of task --write)
   node scripts/grok-companion.mjs task-resume-candidate [--json]
   node scripts/grok-companion.mjs status [job-id] [--json] [--all] [--cwd]
-  node scripts/grok-companion.mjs wait [job-id] [--json] [--timeout-seconds <n>] [--poll-ms <n>]
+  node scripts/grok-companion.mjs wait [job-id] [--json] [--timeout-seconds <n>] [--poll-ms <n>] [--follow]
+  node scripts/grok-companion.mjs logs|follow [job-id] [--json] [--tail <n>] [--follow]
   node scripts/grok-companion.mjs result [job-id] [--json]
   node scripts/grok-companion.mjs cancel [job-id|--all] [--json] [--cwd]
   node scripts/grok-companion.mjs prune [--json] [--keep <n>]`);
@@ -170,6 +171,12 @@ function loadPrompt(name, vars) {
   return text;
 }
 
+const VALUE_FLAGS = new Set([
+  "--model", "-m", "--max-turns", "--session", "--effort",
+  "--scope", "--base", "--keep", "--timeout-seconds", "--poll-ms",
+  "--best-of-n", "--tail",
+]);
+
 function splitArgs(argv) {
   const flags = new Set();
   const kv = {};
@@ -186,6 +193,8 @@ function splitArgs(argv) {
     else if (a === "--cwd") flags.add("cwd");
     else if (a === "--dry-run") flags.add("dry-run");
     else if (a === "--stream") flags.add("stream");
+    else if (a === "--check") flags.add("check");
+    else if (a === "--follow" || a === "-f") flags.add("follow");
     else if (a === "--enable-review-gate") flags.add("enable-review-gate");
     else if (a === "--disable-review-gate") flags.add("disable-review-gate");
     else if (a === "--write") flags.add("write");
@@ -199,10 +208,31 @@ function splitArgs(argv) {
     else if (a === "--keep") kv.keep = Number(argv[++i]);
     else if (a === "--timeout-seconds") kv.timeoutSeconds = Number(argv[++i]);
     else if (a === "--poll-ms") kv.pollMs = Number(argv[++i]);
+    else if (a === "--best-of-n") kv.bestOfN = Number(argv[++i]);
+    else if (a === "--tail") kv.tail = Number(argv[++i]);
     else if (a.startsWith("--")) positionals.push(a);
     else positionals.push(a);
   }
-  return { flags, kv, text: positionals.join(" ").trim() };
+  return {
+    flags,
+    kv,
+    text: positionals.join(" ").trim(),
+    idArg: positionals.find((p) => p !== "all") || null,
+  };
+}
+
+/** First non-flag token that is not a value for a prior flag. */
+function firstIdArg(argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("-")) {
+      if (VALUE_FLAGS.has(a)) i += 1;
+      continue;
+    }
+    if (a === "all") continue;
+    return a;
+  }
+  return null;
 }
 
 function createJob({
@@ -215,12 +245,15 @@ function createJob({
   resumeContinue,
   jsonSchemaPath,
   stream,
+  bestOfN,
+  check,
   meta,
 }) {
   const id = randomUUID();
   // Schema mode requires final JSON object — keep output-format json.
-  // Otherwise default to streaming-json so we can journal progress.
-  const useStream = Boolean(stream) || !jsonSchemaPath;
+  // best-of-n is headless-only and pairs better with non-streaming final JSON.
+  const wantsBestOf = Number.isFinite(bestOfN) && bestOfN > 1;
+  const useStream = (Boolean(stream) || !jsonSchemaPath) && !wantsBestOf && !jsonSchemaPath;
   const job = {
     id,
     kind,
@@ -232,7 +265,9 @@ function createJob({
     resumeSession: resumeSession || null,
     resumeContinue: Boolean(resumeContinue),
     jsonSchemaPath: jsonSchemaPath || null,
-    stream: useStream && !jsonSchemaPath,
+    stream: useStream,
+    bestOfN: wantsBestOf ? bestOfN : null,
+    check: Boolean(check),
     sessionId: null,
     claudeSessionId: process.env[CLAUDE_SESSION_ENV] || null,
     startedAt: nowIso(),
@@ -249,7 +284,13 @@ function createJob({
     structured: null,
     meta: meta || null,
   };
-  appendProgress(job.progressPath, { type: "created", kind: job.kind, stream: job.stream });
+  appendProgress(job.progressPath, {
+    type: "created",
+    kind: job.kind,
+    stream: job.stream,
+    bestOfN: job.bestOfN,
+    check: job.check,
+  });
   return writeJob(job);
 }
 
@@ -291,6 +332,8 @@ function buildGrokArgs(job) {
   ];
   if (job.maxTurns) args.push("--max-turns", String(job.maxTurns));
   if (job.model) args.push("--model", job.model);
+  if (job.bestOfN) args.push("--best-of-n", String(job.bestOfN));
+  if (job.check) args.push("--check");
 
   if (job.jsonSchemaPath) {
     // --json-schema implies json output; do not mix with streaming-json
@@ -821,12 +864,14 @@ async function cmdReview(argv, {
     model: kv.model,
     maxTurns: kv.maxTurns || maxTurnsDefault,
     jsonSchemaPath: REVIEW_SCHEMA_PATH,
+    bestOfN: kv.bestOfN,
     meta: {
       scope: git.scope,
       label: git.label,
       base: git.base || null,
       fileCount: git.fileCount,
       size,
+      bestOfN: Number.isFinite(kv.bestOfN) ? kv.bestOfN : null,
     },
   });
 
@@ -837,6 +882,7 @@ async function cmdReview(argv, {
       jobId: job.id,
       kind,
       grokBin: resolveGrokBin(),
+      bestOfN: job.bestOfN,
       git: {
         scope: git.scope,
         label: git.label,
@@ -931,7 +977,9 @@ async function cmdTask(argv, { forceWrite = false, kind = "task" } = {}) {
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_RESCUE,
     resumeSession,
     resumeContinue,
-    stream: flags.has("stream") || true,
+    stream: flags.has("stream") || !kv.bestOfN,
+    bestOfN: kv.bestOfN,
+    check: flags.has("check"),
   });
 
   if (flags.has("dry-run")) {
@@ -942,6 +990,9 @@ async function cmdTask(argv, { forceWrite = false, kind = "task" } = {}) {
       mode: job.mode,
       resumeSession,
       resumeContinue,
+      bestOfN: job.bestOfN,
+      check: job.check,
+      stream: job.stream,
       argsPreview: buildGrokArgs(job).map((a) => (a.length > 100 ? a.slice(0, 100) + "…" : a)),
     }, null, 2));
     job.status = "cancelled";
@@ -1018,9 +1069,135 @@ function printJobTable(jobs) {
   }
 }
 
+function formatProgressEventLine(ev) {
+  if (!ev || typeof ev !== "object") return String(ev);
+  const t = ev.type || "?";
+  if (t === "heartbeat" || t === "stream") {
+    return `${ev.ts || ""}  ${t.padEnd(10)}  ${formatProgressHuman(ev.progress)}`;
+  }
+  if (t === "finished") {
+    return `${ev.ts || ""}  finished    status=${ev.status} exit=${ev.exitCode}`;
+  }
+  if (t === "spawn") {
+    return `${ev.ts || ""}  spawn       pid=${ev.pid} stream=${ev.stream}`;
+  }
+  if (t === "created") {
+    return `${ev.ts || ""}  created     kind=${ev.kind}${ev.bestOfN ? ` best-of-n=${ev.bestOfN}` : ""}`;
+  }
+  return `${ev.ts || ""}  ${t}  ${JSON.stringify(ev).slice(0, 160)}`;
+}
+
+async function cmdLogs(argv) {
+  const { flags, kv } = splitArgs(argv);
+  const idArg = firstIdArg(argv);
+  const id = resolveJobId(idArg);
+  if (!id) {
+    console.error("No job for logs.");
+    process.exit(1);
+  }
+  const job = readJob(id);
+  if (!job) {
+    console.error(`Job not found: ${id}`);
+    process.exit(1);
+  }
+  const progressPath = job.progressPath;
+  const tailN = Number.isFinite(kv.tail) && kv.tail > 0 ? kv.tail : 30;
+  const follow = flags.has("follow");
+
+  if (!progressPath || !fs.existsSync(progressPath)) {
+    if (flags.has("json")) {
+      console.log(JSON.stringify({ ok: false, jobId: id, events: [], message: "no progress file yet" }, null, 2));
+    } else {
+      console.log(`No progress file yet for ${id}`);
+      if (job.logPath && fs.existsSync(job.logPath)) {
+        console.log(`(stderr log: ${job.logPath})`);
+      }
+    }
+    if (!follow) process.exit(job.status === "running" ? 0 : 0);
+  }
+
+  let offset = 0;
+
+  // byte-offset follow
+  if (fs.existsSync(progressPath)) {
+    const raw = fs.readFileSync(progressPath, "utf8");
+    const all = raw.split("\n").filter(Boolean);
+    const show = all.slice(-tailN);
+    if (flags.has("json") && !follow) {
+      console.log(JSON.stringify({
+        ok: true,
+        jobId: id,
+        status: job.status,
+        progressPath,
+        events: show.map((l) => { try { return JSON.parse(l); } catch { return { raw: l }; } }),
+      }, null, 2));
+      return;
+    }
+    if (!flags.has("json")) {
+      console.log(`# logs ${id.slice(0, 8)}  status=${job.status}  ${progressPath}`);
+      for (const l of show) {
+        try {
+          console.log(formatProgressEventLine(JSON.parse(l)));
+        } catch {
+          console.log(l);
+        }
+      }
+    }
+    offset = Buffer.byteLength(raw, "utf8");
+  }
+
+  if (!follow) return;
+
+  // follow until job finishes (or forever if already finished — print and exit after short settle)
+  const pollMs = Number.isFinite(kv.pollMs) ? kv.pollMs : 500;
+  let idleTicks = 0;
+  while (true) {
+    let j = readJob(id);
+    if (j) j = refreshRunningJob(j);
+
+    if (progressPath && fs.existsSync(progressPath)) {
+      const st = fs.statSync(progressPath);
+      if (st.size > offset) {
+        const fd = fs.openSync(progressPath, "r");
+        const buf = Buffer.alloc(st.size - offset);
+        fs.readSync(fd, buf, 0, buf.length, offset);
+        fs.closeSync(fd);
+        offset = st.size;
+        const chunk = buf.toString("utf8");
+        for (const line of chunk.split("\n").filter(Boolean)) {
+          if (flags.has("json")) {
+            console.log(line);
+          } else {
+            try {
+              console.log(formatProgressEventLine(JSON.parse(line)));
+            } catch {
+              console.log(line);
+            }
+          }
+        }
+        idleTicks = 0;
+      } else {
+        idleTicks += 1;
+      }
+    }
+
+    if (j && j.status !== "running") {
+      // settle a moment for final progress flush
+      if (idleTicks >= 2) {
+        if (!flags.has("json")) {
+          console.log(`# done status=${j.status}`);
+        }
+        process.exit(j.status === "completed" ? 0 : 1);
+      }
+    }
+
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
 async function cmdWait(argv) {
   const { flags, kv } = splitArgs(argv);
-  const idArg = argv.find((a) => !a.startsWith("--"));
+  const idArg = firstIdArg(argv);
   const id = resolveJobId(idArg);
   if (!id) {
     console.error("No job to wait on.");
@@ -1029,6 +1206,14 @@ async function cmdWait(argv) {
   const timeoutMs = (Number.isFinite(kv.timeoutSeconds) ? kv.timeoutSeconds : 900) * 1000;
   const pollMs = Number.isFinite(kv.pollMs) ? kv.pollMs : 1500;
   const started = Date.now();
+  let lastProgLine = "";
+
+  // optional live progress tail while waiting
+  let logOffset = 0;
+  const job0 = readJob(id);
+  if (job0?.progressPath && fs.existsSync(job0.progressPath)) {
+    logOffset = fs.statSync(job0.progressPath).size;
+  }
 
   while (true) {
     let job = readJob(id);
@@ -1037,15 +1222,39 @@ async function cmdWait(argv) {
       process.exit(1);
     }
     job = refreshRunningJob(job);
+
+    if (flags.has("follow") && job.progressPath && fs.existsSync(job.progressPath)) {
+      const st = fs.statSync(job.progressPath);
+      if (st.size > logOffset) {
+        const fd = fs.openSync(job.progressPath, "r");
+        const buf = Buffer.alloc(st.size - logOffset);
+        fs.readSync(fd, buf, 0, buf.length, logOffset);
+        fs.closeSync(fd);
+        logOffset = st.size;
+        for (const line of buf.toString("utf8").split("\n").filter(Boolean)) {
+          if (!flags.has("json")) {
+            try {
+              process.stderr.write(formatProgressEventLine(JSON.parse(line)) + "\n");
+            } catch {
+              process.stderr.write(line + "\n");
+            }
+          }
+        }
+      }
+    }
+
     if (job.status !== "running") {
-      // print result
       console.log(formatJobOutput(job, flags));
       process.exit(job.status === "completed" ? 0 : 1);
     }
-    if (!flags.has("json")) {
+    if (!flags.has("json") && !flags.has("follow")) {
       const last = readLastProgress(job.progressPath, 1)[0];
       const prog = formatProgressHuman(job.progress || last?.progress);
-      process.stderr.write(`waiting ${id.slice(0, 8)} … ${prog}\n`);
+      const line = `waiting ${id.slice(0, 8)} … ${prog}`;
+      if (line !== lastProgLine) {
+        process.stderr.write(line + "\n");
+        lastProgLine = line;
+      }
     }
     if (Date.now() - started > timeoutMs) {
       if (flags.has("json")) {
@@ -1061,7 +1270,7 @@ async function cmdWait(argv) {
 
 function cmdStatus(argv) {
   const { flags } = splitArgs(argv);
-  const idArg = argv.find((a) => !a.startsWith("--") && a !== "status");
+  const idArg = firstIdArg(argv);
 
   // List mode: default = this cwd; --all = global
   if (!idArg || flags.has("all") || flags.has("cwd")) {
@@ -1091,7 +1300,7 @@ function cmdStatus(argv) {
 
 function cmdResult(argv) {
   const { flags } = splitArgs(argv);
-  const idArg = argv.find((a) => !a.startsWith("--"));
+  const idArg = firstIdArg(argv);
   const id = resolveJobId(idArg);
   if (!id) {
     console.error("No jobs yet.");
@@ -1121,9 +1330,10 @@ function cancelOne(job, reason = "cancelled by user") {
 
 function cmdCancel(argv) {
   const { flags } = splitArgs(argv);
-  const idArg = argv.find((a) => !a.startsWith("--"));
+  const idArg = firstIdArg(argv);
+  const wantsAll = flags.has("all") || argv.includes("all");
 
-  if (flags.has("all") || idArg === "all") {
+  if (wantsAll) {
     const pool = flags.has("all") && !flags.has("cwd") ? listJobs() : jobsForCwd();
     const running = pool.filter((j) => j.status === "running");
     const results = running.map((j) => cancelOne(j).job);
@@ -1215,6 +1425,11 @@ async function main() {
       break;
     case "wait":
       await cmdWait(rest);
+      break;
+    case "logs":
+    case "follow":
+      // `follow` implies --follow
+      await cmdLogs(cmd === "follow" ? ["--follow", ...rest] : rest);
       break;
     case "result":
       cmdResult(rest);

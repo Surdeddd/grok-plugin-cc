@@ -49,9 +49,10 @@ Slash: `/grok:rescue <task>`.
 | `/grok:ask` | plan | Free-form Q&A |
 | `/grok:rescue` | write (`task`) | Delegate work via subagent |
 | `/grok:status` / `result` / `cancel` | — | Job control (status default = cwd) |
-| `/grok:wait` | — | Block until background job finishes |
+| `/grok:wait` | — | Block until job finishes (`--follow` for live log) |
+| `/grok:logs` | — | Tail progress journal (`--follow`) |
 
-Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--scope`, `--base`, `--model`, `--max-turns`, `--dry-run`, `--stream` (companion).
+Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--scope`, `--base`, `--best-of-n`, `--check`, `--model`, `--max-turns`, `--dry-run`, `--stream`.
 
 ### Structured review
 
@@ -96,7 +97,10 @@ node scripts/grok-companion.mjs task-resume-candidate
 node scripts/grok-companion.mjs status
 node scripts/grok-companion.mjs cancel --all
 node scripts/grok-companion.mjs prune --keep 50
-node scripts/grok-companion.mjs wait <job-id>
+node scripts/grok-companion.mjs wait <job-id> --follow
+node scripts/grok-companion.mjs logs <job-id> --follow
+node scripts/grok-companion.mjs review --best-of-n 3 --scope working-tree
+node scripts/grok-companion.mjs task --check "fix flaky test"
 node scripts/grok-companion.mjs doctor
 ```
 
@@ -106,7 +110,18 @@ Background/foreground task & ask jobs write:
 
 `~/.grok-plugin-cc/jobs/<id>.progress.jsonl`
 
-`status` shows a short progress summary; `wait` polls until done.
+- `status` — short progress summary  
+- `logs --follow` — live journal  
+- `wait --follow` — block + stream until done  
+
+### Best-of-N / check
+
+```bash
+/grok:review --best-of-n 3 --scope working-tree
+/grok:rescue --check "implement the fix and verify"
+```
+
+Uses Grok CLI `--best-of-n` / `--check` (more tokens; quality over speed).
 
 ## Tests & demo
 
