@@ -1,6 +1,6 @@
 ---
-description: Run a Grok code review against local git state (read-only / plan mode)
-argument-hint: '[--wait|--background] [--json] [--model <model>] [--max-turns <n>] [focus text]'
+description: Run a Grok code review against local git state (read-only / plan mode, structured schema)
+argument-hint: '[--wait|--background] [--scope auto|working-tree|branch] [--base <ref>] [--json] [--model <model>] [--max-turns <n>] [focus text]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -15,12 +15,19 @@ Core constraint:
 - Do not fix issues, apply patches, or suggest that you are about to make changes.
 - Your only job is to run the review and return Grok's output verbatim to the user.
 
+Scope flags (passed through to companion):
+- `--scope auto` (default): dirty working tree if any, else branch vs base
+- `--scope working-tree`: status + staged + unstaged
+- `--scope branch`: diff vs `--base` (default main/master/upstream)
+- `--base <ref>`: base ref for branch scope
+
 Execution mode rules:
 - If the raw arguments include `--wait`, do not ask. Run the review in the foreground.
 - If the raw arguments include `--background`, do not ask. Run the review in a Claude background task.
 - Otherwise, estimate the review size before asking:
   - Start with `git status --short --untracked-files=all`.
   - Also inspect `git diff --shortstat --cached` and `git diff --shortstat`.
+  - For branch scope, use `git diff --shortstat <base>...HEAD`.
   - Treat untracked files as reviewable work even when diff stats are empty.
   - Recommend waiting only when the review is clearly tiny (~1-2 files).
   - In every other case, including unclear size, recommend background.

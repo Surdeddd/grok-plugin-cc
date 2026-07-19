@@ -1,24 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+Next polish layer:
+
+- **Review scopes** — `--scope auto|working-tree|branch` and `--base <ref>` with richer git context
+- **Empty-scope short-circuit** — no token burn when nothing to review
+- **Session lifecycle hooks** — SessionStart exports Claude session id; SessionEnd cancels jobs tagged with that session
+- **Status UX** — default list is current cwd; `--all` for global; shows scope column
+- **Cancel** — `cancel --all` for bulk stop; jobs tagged with `claudeSessionId`
+- **Prune** — `prune [--keep N]` drops old finished job records (default keep 50)
+- **Result meta header** — job id / scope / tokens line above markdown
+- **GitHub Actions** — `npm run check` on push/PR
+
 ## 0.4.0
 
-Polish pass toward Codex daily-use quality:
-
-- **Structured reviews** — `review` / `adversarial-review` force Grok `--json-schema` (`schemas/review-output.schema.json`) and render markdown findings
-- **Per-cwd resume index** — `~/.grok-plugin-cc/cwd-index/<hash>.json` so `--resume-last` is workspace-scoped (falls back to `grok --continue`)
-- **Stop-gate polish** — notes running jobs; skips non-edit turns (setup/status heuristics)
-- **`--dry-run`** on review/ask/task for CI without burning tokens
-- **Tests** — `npm test` / `npm run check` (render, cwd-index, smoke dry-run)
-- Setup reports cwd resume session + running jobs
+Structured reviews, per-cwd resume, dry-run tests, stop-gate polish.
 
 ## 0.3.0
 
-Codex-parity surface: `task`, `task-resume-candidate`, adversarial-review, skills, NL spawn triggers.
+Codex-parity surface: `task`, `task-resume-candidate`, adversarial-review, skills, NL spawn.
 
 ## 0.2.0
 
-Optional Stop review gate (`ALLOW`/`BLOCK`).
+Optional Stop review gate.
 
 ## 0.1.0
 
-Initial setup / review / ask / rescue + job tracking.
+Initial companion.

@@ -1,6 +1,6 @@
 ---
 description: Run a Grok review that challenges the implementation approach and design choices
-argument-hint: '[--wait|--background] [--json] [--model <model>] [--max-turns <n>] [focus ...]'
+argument-hint: '[--wait|--background] [--scope auto|working-tree|branch] [--base <ref>] [--json] [--model <model>] [--max-turns <n>] [focus ...]'
 disable-model-invocation: true
 allowed-tools: Read, Glob, Grep, Bash(node:*), Bash(git:*), AskUserQuestion
 ---
@@ -14,6 +14,8 @@ Raw slash-command arguments:
 Core constraint:
 - Review-only. Do not fix issues or apply patches.
 - Return Grok's output verbatim.
+
+Scope: same as `/grok:review` (`--scope`, `--base`).
 
 Execution mode:
 - `--wait` → foreground; `--background` → background Bash.

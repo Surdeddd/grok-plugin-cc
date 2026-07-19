@@ -20,14 +20,15 @@ function run(args) {
 const setup = run(["setup", "--json"]);
 assert.equal(setup.status, 0, setup.stderr);
 const setupJson = JSON.parse(setup.stdout);
-assert.equal(setupJson.pluginVersion, "0.4.0");
+assert.equal(setupJson.pluginVersion, "0.5.0");
 assert.ok("reviewGateEnabled" in setupJson);
 
-const review = run(["review", "--dry-run"]);
+const review = run(["review", "--dry-run", "--scope", "working-tree"]);
 assert.equal(review.status, 0, review.stderr + review.stdout);
 const reviewJson = JSON.parse(review.stdout);
 assert.equal(reviewJson.dryRun, true);
 assert.equal(reviewJson.kind, "review");
+assert.ok(reviewJson.git);
 assert.ok(reviewJson.argsPreview.includes("--json-schema") || reviewJson.schema);
 
 const adv = run(["adversarial-review", "--dry-run"]);

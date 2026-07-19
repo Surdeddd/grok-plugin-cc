@@ -1,12 +1,12 @@
 {
   "name": "grok-plugin-cc",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "Claude Code plugin: delegate review/ask/rescue to local Grok Build CLI",
   "scripts": {
-    "test": "node tests/review-render.test.mjs && node tests/cwd-index.test.mjs && node tests/smoke-dry-run.test.mjs",
-    "check": "node --check scripts/grok-companion.mjs && node --check scripts/stop-review-gate-hook.mjs && npm test"
+    "test": "node tests/review-render.test.mjs && node tests/cwd-index.test.mjs && node tests/git-context.test.mjs && node tests/smoke-dry-run.test.mjs",
+    "check": "node --check scripts/grok-companion.mjs && node --check scripts/stop-review-gate-hook.mjs && node --check scripts/session-lifecycle-hook.mjs && npm test"
   },
   "engines": {
     "node": ">=18"

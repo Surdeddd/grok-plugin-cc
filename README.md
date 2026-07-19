@@ -44,13 +44,13 @@ Slash: `/grok:rescue <task>`.
 | Command | Mode | What |
 |---|---|---|
 | `/grok:setup` | — | Probe binary + auth; toggle review gate; show cwd resume |
-| `/grok:review` | plan + **schema** | Structured working-tree review |
+| `/grok:review` | plan + **schema** | Structured review (`--scope` / `--base`) |
 | `/grok:adversarial-review` | plan + **schema** | Challenge design/approach |
 | `/grok:ask` | plan | Free-form Q&A |
 | `/grok:rescue` | write (`task`) | Delegate work via subagent |
-| `/grok:status` / `result` / `cancel` | — | Job control |
+| `/grok:status` / `result` / `cancel` | — | Job control (status default = cwd) |
 
-Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--model`, `--max-turns`, `--dry-run` (companion).
+Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--scope`, `--base`, `--model`, `--max-turns`, `--dry-run` (companion).
 
 ### Structured review
 
@@ -59,6 +59,14 @@ Reviews use Grok `--json-schema` with Codex-compatible shape:
 `verdict` · `summary` · `findings[]` · `next_steps[]`
 
 Human output is markdown; `--json` returns the full job envelope (includes `structured`).
+
+Scopes:
+
+```bash
+/grok:review --scope working-tree
+/grok:review --scope branch --base main
+/grok:adversarial-review --scope auto
+```
 
 ### Resume (per workspace)
 
@@ -84,6 +92,9 @@ node scripts/grok-companion.mjs setup --json
 node scripts/grok-companion.mjs review --dry-run
 node scripts/grok-companion.mjs task --resume-last "continue"
 node scripts/grok-companion.mjs task-resume-candidate
+node scripts/grok-companion.mjs status
+node scripts/grok-companion.mjs cancel --all
+node scripts/grok-companion.mjs prune --keep 50
 ```
 
 ## Tests
@@ -92,6 +103,8 @@ node scripts/grok-companion.mjs task-resume-candidate
 npm test          # unit + dry-run smoke (no Grok tokens)
 npm run check     # syntax + tests
 ```
+
+CI: GitHub Actions runs `npm run check` on `main` and PRs.
 
 ## Env
 
