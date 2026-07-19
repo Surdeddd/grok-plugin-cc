@@ -1,22 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+Polish pass toward Codex daily-use quality:
+
+- **Structured reviews** — `review` / `adversarial-review` force Grok `--json-schema` (`schemas/review-output.schema.json`) and render markdown findings
+- **Per-cwd resume index** — `~/.grok-plugin-cc/cwd-index/<hash>.json` so `--resume-last` is workspace-scoped (falls back to `grok --continue`)
+- **Stop-gate polish** — notes running jobs; skips non-edit turns (setup/status heuristics)
+- **`--dry-run`** on review/ask/task for CI without burning tokens
+- **Tests** — `npm test` / `npm run check` (render, cwd-index, smoke dry-run)
+- Setup reports cwd resume session + running jobs
+
 ## 0.3.0
 
-Codex-parity surface for Claude Code discovery and rescue:
-
-- `task` primary runtime entry (write by default; `--readonly` opt-in)
-- `task-resume-candidate` for resume/fresh routing in `/grok:rescue`
-- `/grok:adversarial-review`
-- Skills: `grok-cli-runtime`, `grok-result-handling`, `grok-prompting`
-- Agent `grok:grok-rescue` description includes RU/EN triggers so Claude can spawn from natural language («вызови grok», «grok-агент», …)
-- Rescue command mirrors Codex resume-candidate + AskUserQuestion flow
-- Review command mirrors Codex wait/background estimation flow
+Codex-parity surface: `task`, `task-resume-candidate`, adversarial-review, skills, NL spawn triggers.
 
 ## 0.2.0
 
-- Optional Stop review gate (`ALLOW`/`BLOCK`)
-- Setup gate toggles
+Optional Stop review gate (`ALLOW`/`BLOCK`).
 
 ## 0.1.0
 
-- Initial setup / review / ask / rescue + job tracking
+Initial setup / review / ask / rescue + job tracking.

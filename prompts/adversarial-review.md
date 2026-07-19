@@ -39,14 +39,16 @@ Working tree context:
 
 <finding_bar>
 Report only material findings (no style nits).
-Each finding: what can go wrong, why this path is vulnerable, impact, concrete fix.
+Each finding must answer: what can go wrong, why this path is vulnerable, impact, concrete fix.
 </finding_bar>
 
 <output_contract>
-Markdown with:
-1. **Verdict** — ship / concern / block
-2. **Findings** — severity-ordered, file:line when possible, confidence
-3. **Open risks** — residual unknowns
+Return structured output matching the required JSON schema.
+- verdict: "approve" only if you cannot support any substantive adversarial finding
+- verdict: "needs-attention" if any material risk is worth blocking on
+- findings ordered by severity
+- confidence honest (0..1)
+- next_steps concrete
 </output_contract>
 
 <grounding_rules>

@@ -15,6 +15,7 @@ const ROOT_DIR = path.resolve(SCRIPT_DIR, "..");
 const STATE_DIR = process.env.GROK_PLUGIN_CC_STATE_DIR
   || path.join(os.homedir(), ".grok-plugin-cc");
 const CONFIG_PATH = path.join(STATE_DIR, "config.json");
+const JOBS_DIR = path.join(STATE_DIR, "jobs");
 const STOP_REVIEW_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_MAX_TURNS = 8;
 
@@ -45,6 +46,25 @@ function getConfig() {
   }
 }
 
+function listRunningJobs(cwd) {
+  try {
+    if (!fs.existsSync(JOBS_DIR)) return [];
+    return fs.readdirSync(JOBS_DIR)
+      .filter((f) => /^[0-9a-f-]{36}\.json$/i.test(f))
+      .map((f) => {
+        try {
+          return JSON.parse(fs.readFileSync(path.join(JOBS_DIR, f), "utf8"));
+        } catch {
+          return null;
+        }
+      })
+      .filter((j) => j && j.status === "running")
+      .filter((j) => !cwd || path.resolve(j.cwd || "") === path.resolve(cwd));
+  } catch {
+    return [];
+  }
+}
+
 function resolveGrokBin() {
   if (process.env.GROK_PLUGIN_CC_GROK_BIN) return process.env.GROK_PLUGIN_CC_GROK_BIN;
   const home = path.join(os.homedir(), ".grok", "bin", "grok");
@@ -60,6 +80,16 @@ function authPresent() {
   } catch {
     return false;
   }
+}
+
+function looksNonEditableTurn(message) {
+  const t = String(message || "").trim();
+  if (!t) return true;
+  // setup/status/result dumps and pure Q&A without edit claims
+  if (/^grok-plugin-cc setup/i.test(t)) return true;
+  if (/^job:\s+/m.test(t) && /status:\s+/m.test(t) && t.length < 2000) return true;
+  if (/Grok (task|rescue|review) started in background/i.test(t)) return true;
+  return false;
 }
 
 function buildPrompt(input = {}) {
@@ -82,7 +112,6 @@ function parseStopReviewOutput(rawOutput) {
     };
   }
 
-  // Prefer first non-empty line; tolerate leading whitespace / fences.
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
     if (line.startsWith("ALLOW:")) return { ok: true, reason: null };
@@ -95,7 +124,6 @@ function parseStopReviewOutput(rawOutput) {
     }
   }
 
-  // Fallback: search whole body
   if (/\bALLOW\b/i.test(text) && !/\bBLOCK\b/i.test(text)) {
     return { ok: true, reason: null };
   }
@@ -172,7 +200,20 @@ function main() {
   const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
   const config = getConfig();
 
+  const running = listRunningJobs(cwd);
+  const runningNote = running.length
+    ? `Grok job(s) still running: ${running.map((j) => `${j.id.slice(0, 8)}(${j.kind})`).join(", ")}. Check /grok:status or /grok:cancel.`
+    : null;
+
   if (!config.stopReviewGate) {
+    logNote(runningNote);
+    return;
+  }
+
+  // Skip expensive gate on pure status/setup turns
+  if (looksNonEditableTurn(input.last_assistant_message)) {
+    logNote(runningNote);
+    logNote("stop-review-gate: skipped (non-edit turn heuristic)");
     return;
   }
 
@@ -180,9 +221,12 @@ function main() {
   if (!review.ok) {
     emitDecision({
       decision: "block",
-      reason: review.reason,
+      reason: runningNote ? `${runningNote} ${review.reason}` : review.reason,
     });
+    return;
   }
+
+  logNote(runningNote);
 }
 
 try {

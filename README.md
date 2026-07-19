@@ -1,93 +1,120 @@
 # grok-plugin-cc
 
-Use [Grok Build CLI](https://x.ai) from [Claude Code](https://claude.ai/code) as a second agent — Codex-shaped companion for review, adversarial review, ask, rescue/task, and optional stop-time gate.
+Use [Grok Build CLI](https://x.ai) from [Claude Code](https://claude.ai/code) as a second agent — **Codex-shaped** companion for review, adversarial review, ask, rescue/task, and optional stop-time gate.
 
-Architecture mirrors OpenAI's [`codex-plugin-cc`](https://github.com/openai/codex-plugin-cc): thin slash-command shell + skills + `grok:grok-rescue` subagent + local companion that spawns headless `grok -p`.
+```
+Claude Code  ──slash / NL──►  grok:grok-rescue / commands
+                              └─ node scripts/grok-companion.mjs
+                                   └─ grok -p --output-format json
+```
 
-## Requirements
-
-- **Grok Build CLI** on PATH (or `~/.grok/bin/grok`), authenticated
-- **Node.js** ≥ 18
-- **Claude Code** with plugins enabled
-
-## Install
+## Install (60 seconds)
 
 ```bash
+# Claude Code
 /plugin marketplace add Surdeddd/grok-plugin-cc
 /plugin install grok@grok-marketplace
 /reload-plugins
 /grok:setup
 ```
 
-Local:
+Requires: **Grok Build CLI** authenticated (`~/.grok/bin/grok`), Node ≥ 18.
+
+Local dev:
 
 ```bash
 claude plugin marketplace add ~/Projects/Personal/grok-plugin-cc
 claude plugin install grok@grok-marketplace
+npm --prefix ~/Projects/Personal/grok-plugin-cc run check
 ```
 
-## Natural-language spawn (from Claude context)
+## Natural-language spawn
 
-Claude can spawn the agent without a slash command when you say things like:
+Say things like:
 
-- «вызови grok» / «вызови грок» / «grok-агент» / «подними grok»
-- "call grok" / "spawn grok agent" / "use grok" / "ask grok to …"
+- «вызови grok» / «grok-агент» / «подними grok»
+- "call grok" / "spawn grok" / "ask grok to fix …"
 
-That routes to subagent **`grok:grok-rescue`** → companion `task` → headless `grok -p`.
+→ Claude spawns **`grok:grok-rescue`** → companion `task` → headless Grok (write by default).
 
-Slash form still works: `/grok:rescue <task>`.
+Slash: `/grok:rescue <task>`.
 
 ## Commands
 
 | Command | Mode | What |
 |---|---|---|
-| `/grok:setup` | — | Probe binary + auth; toggle review gate |
-| `/grok:review` | plan | Working-tree review |
-| `/grok:adversarial-review` | plan | Challenge design/approach |
+| `/grok:setup` | — | Probe binary + auth; toggle review gate; show cwd resume |
+| `/grok:review` | plan + **schema** | Structured working-tree review |
+| `/grok:adversarial-review` | plan + **schema** | Challenge design/approach |
 | `/grok:ask` | plan | Free-form Q&A |
-| `/grok:rescue` | write (`task`) | Delegate real work via subagent |
+| `/grok:rescue` | write (`task`) | Delegate work via subagent |
 | `/grok:status` / `result` / `cancel` | — | Job control |
 
-Rescue flags: `--background`, `--wait`, `--resume`, `--fresh`, `--model`, `--max-turns`.
+Flags: `--background`, `--wait`, `--resume` / `--fresh`, `--model`, `--max-turns`, `--dry-run` (companion).
 
-Companion primary entry is **`task`** (Codex parity). `rescue` is a write-forced alias.
+### Structured review
 
-### Optional stop-time review gate
+Reviews use Grok `--json-schema` with Codex-compatible shape:
+
+`verdict` · `summary` · `findings[]` · `next_steps[]`
+
+Human output is markdown; `--json` returns the full job envelope (includes `structured`).
+
+### Resume (per workspace)
+
+Task sessions are indexed per cwd under `~/.grok-plugin-cc/cwd-index/`.
+
+- `/grok:rescue --resume` → last task session **for this repo**
+- if no stored session id → falls back to `grok --continue` for the cwd
+
+### Stop-time review gate (optional)
 
 ```bash
 /grok:setup --enable-review-gate
+/grok:setup --disable-review-gate
 ```
 
-## How it works
+When enabled, Stop hook runs Grok plan-mode; first line must be `ALLOW:` or `BLOCK:`.
+Skips pure setup/status turns; notes running background jobs.
 
+## Companion CLI
+
+```bash
+node scripts/grok-companion.mjs setup --json
+node scripts/grok-companion.mjs review --dry-run
+node scripts/grok-companion.mjs task --resume-last "continue"
+node scripts/grok-companion.mjs task-resume-candidate
 ```
-User: "вызови grok, почини flaky test"
-  └─ Claude spawns grok:grok-rescue
-       └─ node scripts/grok-companion.mjs task "…"
-            └─ grok -p … --output-format json \
-                   --permission-mode bypassPermissions --always-approve
+
+## Tests
+
+```bash
+npm test          # unit + dry-run smoke (no Grok tokens)
+npm run check     # syntax + tests
 ```
-
-Review / ask / stop-gate use `--permission-mode plan`.
-
-State: `~/.grok-plugin-cc/`
 
 ## Env
 
 | Var | Purpose |
 |---|---|
 | `GROK_PLUGIN_CC_GROK_BIN` | Absolute path to `grok` |
-| `GROK_PLUGIN_CC_STATE_DIR` | Override state directory |
+| `GROK_PLUGIN_CC_STATE_DIR` | Override state dir (default `~/.grok-plugin-cc`) |
+
+## Layout
+
+```
+agents/grok-rescue.md     # NL-discoverable subagent
+commands/                 # slash commands
+skills/                   # forwarder contracts
+scripts/grok-companion.mjs
+scripts/lib/              # cwd-index, review-render
+schemas/review-output.schema.json
+hooks/hooks.json          # optional Stop gate
+```
 
 ## Gap vs Codex (honest)
 
-Still lighter than `codex-plugin-cc`:
-
-- no app-server broker / native structured review schema enforcement
-- no session lifecycle SessionStart/End hooks
-- stop-gate is opt-in and uses plan-mode Grok (not a separate native reviewer)
-
-Close enough for daily multi-model rescue + natural-language spawn.
+Still lighter than `codex-plugin-cc`: no app-server broker, no native review-service path. Close enough for daily multi-model rescue + structured reviews.
 
 ## License
 
