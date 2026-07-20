@@ -1,6 +1,6 @@
 {
   "name": "grok",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Use Grok Build CLI from Claude Code for review, ask, and delegated rescue work (Codex-shaped companion + natural-language spawn).",
   "author": {
     "name": "maksimkravcov"

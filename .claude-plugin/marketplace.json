@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Claude Code plugin that delegates review, ask, and rescue work to the local Grok Build CLI.",
-    "version": "0.7.0"
+    "version": "0.7.1"
   },
   "plugins": [
     {

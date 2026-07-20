@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const companion = path.join(root, "scripts", "grok-companion.mjs");
+const pkgVersion = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
 
 function run(args) {
   return spawnSync(process.execPath, [companion, ...args], {
@@ -20,7 +22,7 @@ function run(args) {
 const setup = run(["setup", "--json"]);
 assert.equal(setup.status, 0, setup.stderr);
 const setupJson = JSON.parse(setup.stdout);
-assert.equal(setupJson.pluginVersion, "0.7.0");
+assert.equal(setupJson.pluginVersion, pkgVersion);
 assert.ok("reviewGateEnabled" in setupJson);
 assert.ok(setupJson.checks?.schemaOk);
 

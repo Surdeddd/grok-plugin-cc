@@ -103,18 +103,19 @@ function buildPrompt(input = {}) {
 }
 
 function parseStopReviewOutput(rawOutput) {
+  // Fail-open policy: only an explicit BLOCK finding blocks the stop.
+  // Empty/unexpected output is an infra problem, not a finding — warn and allow.
   const text = String(rawOutput ?? "").trim();
   if (!text) {
     return {
-      ok: false,
-      reason:
-        "The stop-time Grok review returned no final output. Run /grok:review manually or bypass the gate.",
+      ok: true,
+      warn: "stop-review-gate: Grok returned no final output — allowing stop. Run /grok:review manually.",
     };
   }
 
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
-    if (line.startsWith("ALLOW:")) return { ok: true, reason: null };
+    if (line.startsWith("ALLOW:")) return { ok: true };
     if (line.startsWith("BLOCK:")) {
       const reason = line.slice("BLOCK:".length).trim() || text;
       return {
@@ -124,29 +125,35 @@ function parseStopReviewOutput(rawOutput) {
     }
   }
 
-  if (/\bALLOW\b/i.test(text) && !/\bBLOCK\b/i.test(text)) {
-    return { ok: true, reason: null };
+  if (/\bBLOCK\b/.test(text) && !/\bALLOW\b/i.test(text)) {
+    return {
+      ok: false,
+      reason: `Grok stop-time review found issues that still need fixes before ending: ${text.slice(0, 500)}`,
+    };
   }
 
   return {
-    ok: false,
-    reason:
-      "The stop-time Grok review returned an unexpected answer. Run /grok:review manually or bypass the gate.",
+    ok: true,
+    warn: text && !/\bALLOW\b/i.test(text)
+      ? "stop-review-gate: unexpected Grok answer — allowing stop. Run /grok:review manually."
+      : undefined,
   };
 }
 
 function runStopReview(cwd, input = {}) {
+  // Infra failures fail OPEN (warn + allow): a broken Grok setup must never
+  // trap the session in an unstoppable turn. Only real findings block.
   const grok = resolveGrokBin();
   if (!grok) {
     return {
-      ok: false,
-      reason: "Grok binary not found for stop-time review. Run /grok:setup.",
+      ok: true,
+      warn: "stop-review-gate: grok binary not found — gate skipped. Run /grok:setup.",
     };
   }
   if (!authPresent()) {
     return {
-      ok: false,
-      reason: "Grok is not authenticated for stop-time review. Run /grok:setup.",
+      ok: true,
+      warn: "stop-review-gate: grok not authenticated — gate skipped. Run /grok:setup.",
     };
   }
 
@@ -168,19 +175,16 @@ function runStopReview(cwd, input = {}) {
 
   if (result.error?.code === "ETIMEDOUT") {
     return {
-      ok: false,
-      reason:
-        "The stop-time Grok review timed out after 15 minutes. Run /grok:review manually or bypass the gate.",
+      ok: true,
+      warn: "stop-review-gate: Grok review timed out — allowing stop. Run /grok:review manually.",
     };
   }
 
   if (result.status !== 0) {
     const detail = String(result.stderr || result.stdout || "").trim();
     return {
-      ok: false,
-      reason: detail
-        ? `The stop-time Grok review failed: ${detail.slice(0, 500)}`
-        : "The stop-time Grok review failed. Run /grok:review manually or bypass the gate.",
+      ok: true,
+      warn: `stop-review-gate: Grok review failed (${detail.slice(0, 300) || "no detail"}) — allowing stop.`,
     };
   }
 
@@ -205,6 +209,14 @@ function main() {
     ? `Grok job(s) still running: ${running.map((j) => `${j.id.slice(0, 8)}(${j.kind})`).join(", ")}. Check /grok:status or /grok:cancel.`
     : null;
 
+  // Loop guard: if a previous Stop hook already blocked this turn, never block
+  // again — otherwise a persistent finding traps the session forever.
+  if (input.stop_hook_active) {
+    logNote(runningNote);
+    logNote("stop-review-gate: stop_hook_active — allowing stop (loop guard)");
+    return;
+  }
+
   if (!config.stopReviewGate) {
     logNote(runningNote);
     return;
@@ -218,6 +230,7 @@ function main() {
   }
 
   const review = runStopReview(cwd, input);
+  if (review.warn) logNote(review.warn);
   if (!review.ok) {
     emitDecision({
       decision: "block",

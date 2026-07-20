@@ -28,7 +28,7 @@ const JOBS_DIR = path.join(STATE_DIR, "jobs");
 const LATEST_PATH = path.join(STATE_DIR, "latest.json");
 const CONFIG_PATH = path.join(STATE_DIR, "config.json");
 const REVIEW_SCHEMA_PATH = path.join(ROOT_DIR, "schemas", "review-output.schema.json");
-const PLUGIN_VERSION = "0.7.0";
+const PLUGIN_VERSION = "0.7.1";
 const TASK_KINDS = new Set(["task", "rescue"]);
 const REVIEW_KINDS = new Set(["review", "adversarial-review"]);
 const CLAUDE_SESSION_ENV = "GROK_PLUGIN_CC_CLAUDE_SESSION_ID";
@@ -122,16 +122,21 @@ function jobsForCwd(cwd = process.cwd()) {
   return listJobs().filter((j) => path.resolve(j.cwd || "") === resolved);
 }
 
+function isDryRunJob(job) {
+  return job?.status === "cancelled" && job?.error === "dry-run";
+}
+
 function resolveLatestJobId() {
-  const cwdJobs = jobsForCwd();
+  const cwdJobs = jobsForCwd().filter((j) => !isDryRunJob(j));
   if (cwdJobs[0]?.id) return cwdJobs[0].id;
   if (fs.existsSync(LATEST_PATH)) {
     try {
       const latest = JSON.parse(fs.readFileSync(LATEST_PATH, "utf8"));
-      if (latest?.id && readJob(latest.id)) return latest.id;
+      const j = latest?.id ? readJob(latest.id) : null;
+      if (j && !isDryRunJob(j)) return latest.id;
     } catch { /* fall through */ }
   }
-  return listJobs()[0]?.id ?? null;
+  return listJobs().find((j) => !isDryRunJob(j))?.id ?? null;
 }
 
 function resolveJobId(arg) {
@@ -217,7 +222,6 @@ function splitArgs(argv) {
     flags,
     kv,
     text: positionals.join(" ").trim(),
-    idArg: positionals.find((p) => p !== "all") || null,
   };
 }
 
@@ -250,10 +254,12 @@ function createJob({
   meta,
 }) {
   const id = randomUUID();
-  // Schema mode requires final JSON object — keep output-format json.
-  // best-of-n is headless-only and pairs better with non-streaming final JSON.
+  // Streaming is the default for progress visibility, but schema mode requires
+  // a final JSON object and best-of-n pairs with non-streaming final JSON —
+  // both force it off regardless of the flag.
   const wantsBestOf = Number.isFinite(bestOfN) && bestOfN > 1;
-  const useStream = (Boolean(stream) || !jsonSchemaPath) && !wantsBestOf && !jsonSchemaPath;
+  void stream; // explicit --stream is accepted but never needed: on unless forced off
+  const useStream = !jsonSchemaPath && !wantsBestOf;
   const job = {
     id,
     kind,
@@ -358,6 +364,11 @@ function buildGrokArgs(job) {
 }
 
 function finalizeJob(job, { exitCode, stdout, stderr, error, streamFinish }) {
+  // Cancel guard: `cancel` (another process) may have killed us and already
+  // marked the job cancelled — don't overwrite that with "failed".
+  const onDisk = readJob(job.id);
+  const wasCancelled = onDisk?.status === "cancelled" && !isDryRunJob(onDisk);
+
   let parsed;
   if (streamFinish) {
     parsed = {
@@ -373,10 +384,12 @@ function finalizeJob(job, { exitCode, stdout, stderr, error, streamFinish }) {
 
   job.exitCode = exitCode;
   job.finishedAt = nowIso();
-  job.status = exitCode === 0 ? "completed" : "failed";
+  job.status = wasCancelled ? "cancelled" : (exitCode === 0 ? "completed" : "failed");
   job.sessionId = parsed.sessionId || job.sessionId;
   job.text = parsed.text || null;
-  job.error = error || (exitCode === 0 ? null : (stderr || `exit ${exitCode}`).slice(0, 2000));
+  job.error = wasCancelled
+    ? (onDisk.error || "cancelled by user")
+    : (error || (exitCode === 0 ? null : (stderr || `exit ${exitCode}`).slice(0, 2000)));
   job.usage = parsed.usage || null;
 
   if (REVIEW_KINDS.has(job.kind)) {
@@ -624,14 +637,23 @@ child.on("close", (code) => {
       raw = obj;
     } catch { text = stdout; }
   }
+  // Cancel guard: preserve a "cancelled" status written by another process.
+  let wasCancelled = false;
+  let cancelError = null;
+  try {
+    const onDisk = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+    if (onDisk.status === "cancelled") { wasCancelled = true; cancelError = onDisk.error; }
+  } catch {}
   job.exitCode = code ?? 1;
-  job.status = code === 0 ? "completed" : "failed";
+  job.status = wasCancelled ? "cancelled" : (code === 0 ? "completed" : "failed");
   job.finishedAt = new Date().toISOString();
   job.sessionId = sessionId;
   job.text = text;
   job.usage = usage;
   job.progress = snap();
-  job.error = code === 0 ? null : Buffer.concat(err).toString("utf8").slice(0, 2000);
+  job.error = wasCancelled
+    ? (cancelError || "cancelled by user")
+    : (code === 0 ? null : Buffer.concat(err).toString("utf8").slice(0, 2000));
   try { fs.writeFileSync(job.outputPath, JSON.stringify(raw, null, 2)); } catch {}
   fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
   appendProgress({ type: "finished", status: job.status, exitCode: job.exitCode, progress: job.progress });
@@ -949,7 +971,7 @@ async function cmdAsk(argv) {
     mode: "readonly",
     model: kv.model,
     maxTurns: kv.maxTurns || DEFAULT_MAX_TURNS_ASK,
-    stream: flags.has("stream") || true,
+    stream: true,
   });
 
   if (flags.has("dry-run")) {
@@ -1142,7 +1164,7 @@ async function cmdLogs(argv) {
         console.log(`(stderr log: ${job.logPath})`);
       }
     }
-    if (!follow) process.exit(job.status === "running" ? 0 : 0);
+    if (!follow) process.exit(0);
   }
 
   let offset = 0;
@@ -1344,20 +1366,26 @@ function cmdResult(argv) {
   process.exit(job.status === "completed" ? 0 : 1);
 }
 
-function cancelOne(job, reason = "cancelled by user") {
+async function cancelOne(job, reason = "cancelled by user") {
   if (job.status !== "running") return { job, changed: false };
-  if (job.pid) {
-    try { process.kill(job.pid, "SIGTERM"); } catch { /* ignore */ }
-    try { process.kill(job.pid, "SIGKILL"); } catch { /* ignore */ }
-  }
+  // Mark cancelled FIRST so a finalizing runner preserves the status,
+  // then TERM with a short grace period before KILL.
   job.status = "cancelled";
   job.finishedAt = nowIso();
   job.error = reason;
   writeJob(job);
+  if (job.pid) {
+    let alive = true;
+    try { process.kill(job.pid, "SIGTERM"); } catch { alive = false; }
+    if (alive) {
+      await new Promise((r) => setTimeout(r, 1200));
+      try { process.kill(job.pid, 0); process.kill(job.pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
   return { job, changed: true };
 }
 
-function cmdCancel(argv) {
+async function cmdCancel(argv) {
   const { flags } = splitArgs(argv);
   const idArg = firstIdArg(argv);
   const wantsAll = flags.has("all") || argv.includes("all");
@@ -1365,7 +1393,8 @@ function cmdCancel(argv) {
   if (wantsAll) {
     const pool = flags.has("all") && !flags.has("cwd") ? listJobs() : jobsForCwd();
     const running = pool.filter((j) => j.status === "running");
-    const results = running.map((j) => cancelOne(j).job);
+    const results = [];
+    for (const j of running) results.push((await cancelOne(j)).job);
     if (flags.has("json")) console.log(JSON.stringify({ cancelled: results.length, jobs: results }, null, 2));
     else console.log(`Cancelled ${results.length} running job(s)${flags.has("all") && !flags.has("cwd") ? " (global)" : " (cwd)"}.`);
     return;
@@ -1386,7 +1415,7 @@ function cmdCancel(argv) {
     else console.log(`Job ${job.id} is already ${job.status}.`);
     return;
   }
-  const { job: done } = cancelOne(job);
+  const { job: done } = await cancelOne(job);
   if (flags.has("json")) console.log(JSON.stringify(done, null, 2));
   else console.log(`Cancelled ${done.id}`);
 }
@@ -1404,7 +1433,7 @@ function cmdPrune(argv) {
       fs.unlinkSync(jobPath(j.id));
       removed += 1;
     } catch { /* ignore */ }
-    for (const side of [j.outputPath, j.logPath]) {
+    for (const side of [j.outputPath, j.logPath, j.progressPath]) {
       try { if (side && fs.existsSync(side)) fs.unlinkSync(side); } catch { /* ignore */ }
     }
   }
@@ -1464,7 +1493,7 @@ async function main() {
       cmdResult(rest);
       break;
     case "cancel":
-      cmdCancel(rest);
+      await cmdCancel(rest);
       break;
     case "prune":
       cmdPrune(rest);

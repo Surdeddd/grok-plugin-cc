@@ -76,14 +76,20 @@ function handleSessionEnd(input) {
     // Only auto-kill if we tagged the job with this Claude session; otherwise leave detached tasks alone
     if (!sameSession) continue;
     if (!sameCwd && job.cwd) continue;
-    if (job.pid) {
-      try { process.kill(job.pid, "SIGTERM"); } catch { /* ignore */ }
-      try { process.kill(job.pid, "SIGKILL"); } catch { /* ignore */ }
-    }
+    // Mark cancelled first so a finalizing runner preserves the status,
+    // then TERM with a short grace period before KILL.
     job.status = "cancelled";
     job.finishedAt = new Date().toISOString();
     job.error = "cancelled on Claude SessionEnd";
     writeJob(job);
+    if (job.pid) {
+      let alive = true;
+      try { process.kill(job.pid, "SIGTERM"); } catch { alive = false; }
+      if (alive) {
+        try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800); } catch { /* ignore */ }
+        try { process.kill(job.pid, 0); process.kill(job.pid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    }
     killed += 1;
   }
 
