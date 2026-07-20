@@ -127,16 +127,22 @@ function isDryRunJob(job) {
 }
 
 function resolveLatestJobId() {
-  const cwdJobs = jobsForCwd().filter((j) => !isDryRunJob(j));
-  if (cwdJobs[0]?.id) return cwdJobs[0].id;
-  if (fs.existsSync(LATEST_PATH)) {
-    try {
-      const latest = JSON.parse(fs.readFileSync(LATEST_PATH, "utf8"));
-      const j = latest?.id ? readJob(latest.id) : null;
-      if (j && !isDryRunJob(j)) return latest.id;
-    } catch { /* fall through */ }
-  }
-  return listJobs().find((j) => !isDryRunJob(j))?.id ?? null;
+  // Prefer real jobs over dry-run artifacts, but fall back to a dry-run job
+  // when nothing else exists (fresh state) so logs/status still resolve.
+  const pick = (skipDryRun) => {
+    const keep = (j) => j && (!skipDryRun || !isDryRunJob(j));
+    const cwdJob = jobsForCwd().find(keep);
+    if (cwdJob?.id) return cwdJob.id;
+    if (fs.existsSync(LATEST_PATH)) {
+      try {
+        const latest = JSON.parse(fs.readFileSync(LATEST_PATH, "utf8"));
+        const j = latest?.id ? readJob(latest.id) : null;
+        if (keep(j)) return latest.id;
+      } catch { /* fall through */ }
+    }
+    return listJobs().find(keep)?.id ?? null;
+  };
+  return pick(true) ?? pick(false);
 }
 
 function resolveJobId(arg) {
