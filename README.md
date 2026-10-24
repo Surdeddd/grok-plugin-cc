@@ -1,5 +1,7 @@
 # grok-plugin-cc
 
+Русская версия: [README.ru.md](./README.ru.md)
+
 Use [Grok Build CLI](https://x.ai) from [Claude Code](https://claude.ai/code) as a second agent — **Codex-shaped** companion for review, adversarial review, ask, rescue/task, and optional stop-time gate.
 
 ```
@@ -23,9 +25,9 @@ Requires: **Grok Build CLI** authenticated (`~/.grok/bin/grok`), Node ≥ 18.
 Local dev:
 
 ```bash
-claude plugin marketplace add ~/Projects/Personal/grok-plugin-cc
+claude plugin marketplace add <path-to-your-clone>
 claude plugin install grok@grok-marketplace
-npm --prefix ~/Projects/Personal/grok-plugin-cc run check
+npm --prefix <path-to-your-clone> run check
 ```
 
 ## Natural-language spawn
